@@ -237,3 +237,8 @@ _verify_*
 
 # Local personal project doc (Elden Ring CT localization) - keep local only
 /usage.md
+
+# Incomplete npm packaging scaffold (kept local, undecided)
+/bin/
+/package.json
+/ce_mcp.7z
