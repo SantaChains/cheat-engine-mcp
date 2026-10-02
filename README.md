@@ -2,7 +2,7 @@
 
 # Cheat Engine MCP Bridge — Native TCP Edition
 
-[![Version](https://img.shields.io/badge/version-15.5.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-Native%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/tools-243-brightgreen.svg)](#available-tools)
+[![Version](https://img.shields.io/badge/version-15.6.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-Native%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/tools-244-brightgreen.svg)](#available-tools)
 
 Let your AI assistant (Claude, Cursor, Codex, any MCP client) drive **Cheat Engine** directly:
 read and write process memory, scan for values, disassemble functions, set breakpoints,
@@ -103,7 +103,7 @@ Expected output:
 ```
 [MCP] CE x64 - loading ce_mcp_tcp_x64.dll
 [MCP] DLL loaded OK from: C:\Program Files\Cheat Engine\plugins\ce_mcp_tcp_x64.dll
-[MCP] Bridge v15.5.0 started on 127.0.0.1:17171 (native TCP, 1ms poll)
+[MCP] Bridge v15.6.0 started on 127.0.0.1:17171 (native TCP, 1ms poll)
 ```
 
 No window will pop up — the DLL debug console is hidden by default (`CE_MCP_DEBUG_CONSOLE=1` shows it without stealing focus).
@@ -225,7 +225,7 @@ By default the DLL binds to `127.0.0.1` only. For remote access set `CE_MCP_BIND
 Ask the AI: *"Ping Cheat Engine"*
 
 ```json
-{"success": true, "version": "15.5.0", "message": "CE MCP Bridge v15.5.0 alive"}
+{"success": true, "version": "15.6.0", "message": "CE MCP Bridge v15.6.0 alive"}
 ```
 
 ---
@@ -244,6 +244,8 @@ Ask the AI: *"Ping Cheat Engine"*
 | `CE_MCP_ALLOW_SHELL` | *(unset)* | `1` to enable `run_command`/`shell_execute` |
 | `CE_MCP_BIND` | `127.0.0.1` | DLL listener bind address; set `0.0.0.0` before CE starts for remote debugging |
 | `CE_MCP_DEBUG_CONSOLE` | *(unset)* | `1` to show the DLL debug console (never steals focus) |
+| `CE_MCP_TOOLS` | `all` | **Tool loading profile**: `all` / `core` (alias `minimal`) / `core,memory,debug,...` — see [Progressive Tool Loading](#progressive-tool-loading) |
+| `CE_MCP_AUTH_TOKEN` | *(unset)* | Shared token auth: set on both sides so every request carries `params._auth` and the bridge rejects the rest with `AUTH_REQUIRED` |
 
 > A timed-out command is **never** retried: it may already have executed inside CE
 > (`write_memory`, `auto_assemble`, `inject_dll`, `execute_code`), so replaying it would apply the
@@ -251,40 +253,95 @@ Ask the AI: *"Ping Cheat Engine"*
 
 ---
 
-## Available Tools (243 MCP tools / 248 dispatcher methods)
+## Progressive Tool Loading
 
-The Python side exposes **243** `@mcp.tool()` functions; the Lua dispatcher resolves **248** methods
+244 tools with full JSON schemas in one `tools/list` costs a client a lot of context on every
+session start. The server therefore loads tools in **layers**:
+
+- `CE_MCP_TOOLS=all` *(default)* — everything, exactly as before.
+- `CE_MCP_TOOLS=core` (alias `minimal`) — only 15 always-on tools: bridge health
+  (`bridge_status`, `ping`, `dll_status`), memory IO basics, `evaluate_lua`, batch/audit
+  introspection, modal-dialog recovery (`dialog_enum`/`dialog_dismiss`) and `ce_tools_manage`.
+- `CE_MCP_TOOLS=core,memory,debug` — core plus any of the 18 categories below.
+
+At runtime the always-registered **`ce_tools_manage`** tool extends the surface without a restart:
+
+```json
+{"name": "ce_tools_manage", "arguments": {"action": "list"}}
+{"name": "ce_tools_manage", "arguments": {"action": "enable", "categories": ["memory", "debug"]}}
+```
+
+`enable` is idempotent and sends `notifications/tools/list_changed` when the client supports it
+(otherwise: re-list tools or reconnect). Categories: `core`, `memory`, `scan`, `disasm`, `debug`,
+`process`, `symbols`, `structures`, `table`, `aa`, `exec`, `dotnet`, `dissect`, `custom`,
+`ui_input`, `system`, `kernel`, `net`.
+
+---
+
+## Available Tools (244 registered tools / 248 dispatcher methods)
+
+The Python side records **243** `@mcp.tool()` functions plus the `ce_tools_manage` meta tool
+(**244** registered by default); the Lua dispatcher resolves **248** methods
 (the difference is aliases such as `read_bytes` → `read_memory`, `status` → `bridge_status`).
 
-| Category | Examples |
-|----------|----------|
-| **Memory Read/Write** | `read_memory`, `write_memory`, `read_integer`, `write_string`, `read_pointer_chain` |
-| **Scanning** | `scan_all`, `next_scan`, `aob_scan`, `aob_scan_module`, `search_string` |
-| **Disassembly & Analysis** | `disassemble`, `analyze_function`, `find_function_boundaries`, `find_references`, `find_call_references` |
-| **Code Injection** | `auto_assemble`, `inject_dll`, `execute_code`, `compile_c_code` |
-| **Breakpoints & Debug** | `set_breakpoint`, `set_data_breakpoint`, `start_dbvm_watch`, `get_breakpoint_hits` |
-| **Process & Modules** | `open_process`, `get_process_list`, `enum_modules`, `get_symbol_address` |
-| **Structures** | `create_structure`, `dissect_structure`, `add_element_to_structure`, `get_rtti_classname` |
-| **Memory Management** | `allocate_memory`, `free_memory`, `get_memory_protection`, `get_memory_regions` |
-| **Cheat Table** | `load_table`, `save_table`, `create_memory_record`, `set_memory_record_active`, `set_memory_record_address`, `set_memory_record_script`, `get_memory_record_children` |
-| **GUI & Input** | `find_window`, `is_key_pressed`, `get_pixel`, `show_message`, `speak_text` |
-| **Speed & Hotkeys** | `set_speed`, `get_speed`, `create_hotkey`, `remove_hotkey` |
-| **Custom Value Types** | `register_custom_type`, `read_custom`, `write_custom`, `get_custom_type` |
-| **Code Dissection** | `dissect_code_start`, `dissect_code_references`, `dissect_code_strings`, `dissect_code_functions` |
-| **.NET Runtime** | `dotnet_status`, `dotnet_enum_domains`, `dotnet_enum_types`, `dotnet_type_details`, `dotnet_address_info` |
-| **Structure Guessing** | `auto_guess_structure` |
-| **Disassembly Context** | `get_previous_opcode`, `get_last_disassemble_data` |
-| **Table Files** | `table_file_create`, `table_file_export`, `table_file_delete` |
-| **AA Extensions** | `register_aa_command`, `unregister_aa_command` |
-| **Network (from CE)** | `http_get`, `http_post` |
-| **Kernel / DBVM** | `dbk_initialize`, `dbk_use_kernelmode`, `dbvm_initialize`, `dbvm_cloak_activate`, `dbvm_cloak_read` |
-| **File & System** | `file_exists`, `md5_file`, `get_file_list`, `evaluate_lua` |
-| **Kernel (DBK/DBVM)** | `dbk_get_cr3`, `get_physical_address`, `read_process_memory_cr3` |
-| **Bridge control** | `batch_call`, `bridge_status`, `list_bridge_methods`, `dll_status`, `dialog_enum`, `dialog_dismiss` |
+| Category | Tools | Examples |
+|----------|-------|----------|
+| **core** (always on) | 15 | `bridge_status`, `ping`, `evaluate_lua`, `batch_call`, `dialog_enum`, `ce_tools_manage` |
+| **memory** | 20 | `read_memory`, `write_memory`, `read_pointer_chain`, `allocate_memory`, `set_memory_protection` |
+| **scan** | 21 | `scan_all`, `aob_scan`, `aob_scan_unique`, `pointer_rescan`, `persistent_scan_*`, `generate_signature` |
+| **disasm** | 9 | `disassemble`, `analyze_function`, `find_references`, `get_previous_opcode` |
+| **debug** | 22 | `set_breakpoint`, `debug_get_context`, `debug_continue`, `start_dbvm_watch` |
+| **process** | 16 | `open_process`*(core)*, `get_process_list`, `pause_process`, `set_speed`, `queue_to_main_thread` |
+| **symbols** | 14 | `get_symbol_address`, `get_symbol_info`, `register_symbol`, `reinitialize_symbol_handler` |
+| **structures** | 8 | `create_structure`, `dissect_structure`, `auto_guess_structure`, `export_structure_to_xml` |
+| **table** | 23 | `load_table`, `save_table`, `create_memory_record`, `set_memory_record_active`, `table_file_*` |
+| **aa** | 8 | `auto_assemble`, `compile_c_code`, `generate_code_injection_script`, `register_aa_command` |
+| **exec** | 8 | `execute_code`, `execute_code_ex`, `inject_dll`, `inject_dotnet_dll` |
+| **dotnet** | 8 | `dotnet_status`, `dotnet_enum_types`, `dotnet_type_details`, `dotnet_enum_objects` |
+| **dissect** | 5 | `dissect_code_start`, `dissect_code_references`, `dissect_code_strings`, `dissect_code_functions` |
+| **custom** | 8 | `create_hotkey`, `register_custom_type`, `read_custom`, `write_custom` |
+| **ui_input** | 13 | `find_window`, `is_key_pressed`, `do_key_press`, `get_mouse_pos`, `send_window_message` |
+| **system** | 23 | `file_exists`, `get_file_list`, `read_clipboard`, `show_message`, `md5_file`, `write_region_to_file` |
+| **kernel** | 21 | `dbk_initialize`, `read_process_memory_cr3`, `dbvm_initialize`, `dbvm_cloak_*` |
+| **net** | 2 | `http_get`, `http_post` |
 
 > **Batch is the fast path.** With a 1 ms main-thread poll and one command in flight at a time,
 > round trips dominate latency. `batch_call(calls=[{method, params}, ...])` runs up to **64** commands
 > in a single round trip and returns a per-item result array.
+
+### Recommended Workflows
+
+**Pointer tracing**
+
+```json
+// 1. Find what accesses the address (get a register value like RBX from the context)
+{"name": "find_what_accesses_or_debug_get_context", "arguments": {"address": "0x255D5E758"}}
+// 2. Value-scan for that pointer target, then narrow down
+{"name": "create_persistent_scan", ...} // first scan → persistent_scan_next_scan → ... → game.exe+offset
+// Or go straight to pointer rescan once you have a candidate base
+{"name": "pointer_rescan", "arguments": {...}}
+```
+
+**Function analysis**
+
+```json
+// 1. Boundaries + disassembly
+{"name": "find_function_boundaries", "arguments": {"address": "0x14587EDB0"}}
+{"name": "analyze_function", "arguments": {"address": "0x14587EDB0"}}
+// 2. Step through execution
+{"name": "set_breakpoint", "arguments": {"address": "0x14587EDB0"}}
+{"name": "debug_get_context", "arguments": {}}
+// 3. Signature for game updates
+{"name": "generate_signature", "arguments": {"address": "0x14587EDB0"}}
+```
+
+**Cheat table pipeline**
+
+```json
+{"name": "load_table", "arguments": {"path": "C:/tables/game.CT"}}
+{"name": "get_address_list", "arguments": {}}
+{"name": "set_memory_record_active", "arguments": {"id": 12, "active": true}}
+```
 
 Full reference: [`AI_Context/MCP_Bridge_Command_Reference.md`](AI_Context/MCP_Bridge_Command_Reference.md)
 
@@ -309,7 +366,7 @@ python MCP_Server/test_bridge.py              # identity, dispatcher parity, bat
 python MCP_Server/test_bridge.py --allow-write  # + allocate / write / read-back
 ```
 
-Current status: **163/0** Lua unit assertions, **27/0** Python contract assertions, **4/0** probe self-test.
+Current status: **221/0** Lua unit assertions, **38/0** Python contract assertions, **4/0** probe self-test.
 
 ---
 

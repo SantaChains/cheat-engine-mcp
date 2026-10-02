@@ -26,6 +26,7 @@ Exit code is 0 when every executed check passed.
 """
 
 import argparse
+import asyncio
 import importlib.util
 import json
 import os
@@ -534,6 +535,54 @@ def run_self_test():
     r = ce.call("definitely_not_a_method")
     c.check("unknown method -> METHOD_NOT_FOUND",
             r.get("error_code") == "METHOD_NOT_FOUND", results_to_text(r))
+
+    # -------------------------------------------------- layered tool loading
+    c.section("layered tool loading (UNIT-32)")
+    c.check("243 tools recorded at definition time", len(ce._TOOL_SPECS) == 243,
+            len(ce._TOOL_SPECS))
+    c.check("category catalog covers every tool",
+            ce._uncategorized_tool_names() == [], ce._uncategorized_tool_names())
+    c.check("profile 'core' resolves to core only",
+            ce._resolve_profile("core") == ["core"], ce._resolve_profile("core"))
+    c.check("profile 'minimal' aliases core",
+            ce._resolve_profile("minimal") == ["core"])
+    try:
+        ce._resolve_profile("bogus_category")
+        c.check("unknown profile category rejected", False, "no ValueError")
+    except ValueError:
+        c.check("unknown profile category rejected", True)
+
+    async def _count_tools(server):
+        return len(await server.list_tools())
+
+    n_tools = asyncio.run(_count_tools(ce.mcp))
+    c.check("default profile registers 244 tools (243 + ce_tools_manage)",
+            n_tools == 244, n_tools)
+    catalog = json.loads(ce.ce_tools_manage("list"))
+    c.check("ce_tools_manage('list') reports 244 available",
+            catalog.get("success") is True and catalog.get("total_available") == 244,
+            results_to_text(catalog)[:120])
+    enabled = json.loads(ce.ce_tools_manage("enabled"))
+    c.check("ce_tools_manage('enabled') count matches list_tools",
+            enabled.get("count") == n_tools, results_to_text(enabled)[:120])
+    again = json.loads(ce.ce_tools_manage("enable", ["core"]))
+    c.check("enable is idempotent (no duplicate registration)",
+            again.get("added_count") == 0, results_to_text(again))
+
+    # ------------------------------------------------------------ auth token
+    c.section("auth token injection (CE_MCP_AUTH_TOKEN)")
+    probe = ce.TCPBridgeClient("127.0.0.1", stub.port)
+    original_token = ce.CE_AUTH_TOKEN
+    ce.CE_AUTH_TOKEN = "t0ken"
+    try:
+        wire = json.loads(probe._build_request("echo", {"a": 1}).decode("utf-8"))
+        c.check("token injected as params._auth", wire["params"].get("_auth") == "t0ken",
+                wire["params"])
+    finally:
+        ce.CE_AUTH_TOKEN = original_token
+    wire = json.loads(probe._build_request("echo", {"a": 1}).decode("utf-8"))
+    c.check("no _auth field when token unset", "_auth" not in wire["params"],
+            wire["params"])
 
     stub.stop()
     return c.summary()

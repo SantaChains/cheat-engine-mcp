@@ -105,12 +105,23 @@ import traceback
 import socket as _socket
 
 try:
-    from mcp.server.fastmcp import FastMCP
-    
+    # SDK dual-version compatibility: mcp 2.x renamed FastMCP to MCPServer
+    # (mcp.server.mcpserver); 1.x keeps FastMCP (mcp.server.fastmcp). Both
+    # expose the same decorator/add_tool/run surface this module uses, and
+    # both import stdio_server into their server module namespace, so the
+    # Windows CRLF patch below can be applied to whichever one is present.
+    try:
+        from mcp.server.mcpserver import MCPServer as _ServerClass  # mcp >= 2
+        _MCP_SERVER_MODULE = "mcp.server.mcpserver.server"
+    except ImportError:  # mcp 1.x
+        from mcp.server.fastmcp import FastMCP as _ServerClass  # noqa: F401
+        _MCP_SERVER_MODULE = "mcp.server.fastmcp.server"
+
     if sys.platform == "win32":
-        import mcp.server.fastmcp.server as fastmcp_server
+        import importlib as _importlib
+        fastmcp_server = _importlib.import_module(_MCP_SERVER_MODULE)
         fastmcp_server.stdio_server = _patched_stdio_server
-        
+
 except ImportError as e:
     print(f"[MCP CE] Import Error: {e}", file=sys.stderr, flush=True)
     sys.exit(1)
@@ -156,6 +167,14 @@ MAX_REQUEST_SIZE_BYTES = 4 * 1024 * 1024
 # shipped a native TCP server (4-byte LE length prefix + JSON-RPC) since v15.
 CE_HOST = os.environ.get("CE_HOST", "127.0.0.1")
 CE_PORT = int(os.environ.get("CE_PORT", "17171"))
+
+# Optional shared-token authentication (design borrowed from
+# tonytranrp/cheat-engine-mcp, implemented at the Lua dispatch layer — no DLL
+# change). Set CE_MCP_AUTH_TOKEN to the same value on both sides; when set,
+# every request carries params._auth and the Lua bridge rejects anything else
+# with AUTH_REQUIRED before the handler runs. Unset on both sides = open
+# loopback access (the default).
+CE_AUTH_TOKEN = os.environ.get("CE_MCP_AUTH_TOKEN") or None
 
 # How many extra attempts after the first failure. Only ever applied to
 # *connection* failures — never to timeouts (see send_command).
@@ -301,10 +320,13 @@ class BaseBridgeClient:
 
     # ---- request path ------------------------------------------------------
     def _build_request(self, method, params):
+        params = dict(params or {})
+        if CE_AUTH_TOKEN is not None:
+            params.setdefault("_auth", CE_AUTH_TOKEN)
         payload = {
             "jsonrpc": "2.0",
             "method": method,
-            "params": params or {},
+            "params": params,
             "id": next(_REQUEST_COUNTER),
         }
         # ensure_ascii=False is REQUIRED: the Lua side must receive raw UTF-8.
@@ -603,7 +625,45 @@ def call(method, params=None, retries=None):
 # MCP SERVER — v15.1 (native TCP transport)
 # ============================================================================
 
-mcp = FastMCP(MCP_SERVER_NAME)
+mcp = _ServerClass(MCP_SERVER_NAME)
+
+# ============================================================================
+# UNIT-32 — LAYERED / PROGRESSIVE TOOL LOADING
+# ============================================================================
+# 243 tools with full JSON schemas in a single tools/list costs the client
+# tens of thousands of tokens of context on every session start. Tools are
+# therefore *recorded* while the module body executes (mcp.tool is swapped
+# for a recorder below) and only registered selectively:
+#
+#   CE_MCP_TOOLS=all                      (default) register everything
+#   CE_MCP_TOOLS=core                     only the always-on core set
+#   CE_MCP_TOOLS=core,memory,debug,...    core plus named categories
+#   CE_MCP_TOOLS=minimal                  alias for "core"
+#
+# "core" is always included so the agent can always: check bridge health,
+# read/write memory, evaluate Lua, recover from modal dialogs and load more
+# tool categories via the always-registered ce_tools_manage tool.
+#
+# Startup registration is done by _register_startup_tools() at the bottom of
+# this module; ce_tools_manage(action="enable", ...) extends the surface at
+# runtime and best-effort sends notifications/tools/list_changed.
+# ============================================================================
+
+_TOOL_SPECS = []  # function objects in definition order; FastMCP derives the
+                  # tool name and description from __name__ / __doc__
+
+
+def _record_tool(*_args, **_kwargs):
+    """Drop-in stand-in for FastMCP.tool() during the module body: record the
+    function for selective registration instead of registering immediately."""
+    def decorator(fn):
+        _TOOL_SPECS.append(fn)
+        return fn
+    return decorator
+
+
+mcp.tool = _record_tool  # instance attribute shadows the class method until
+                         # startup registration completes, then it is removed
 
 # --- BRIDGE INTROSPECTION & BATCHING ---
 
@@ -3454,6 +3514,381 @@ def dbvm_cloak_write(physical_base: int, bytes: list) -> str:
                               {"physical_base": physical_base, "bytes": bytes}))
 
 # >>> END UNIT-31 <<<
+
+# ============================================================================
+# UNIT-32 (continued) — category catalog, profile selection, dynamic loading
+# ============================================================================
+
+# tool name -> category. "core" is always registered regardless of profile.
+_TOOL_CATEGORIES = {
+    # --- core: always on (health, memory IO basics, Lua escape hatch,
+    #     modal-dialog recovery, this manager) ---
+    "bridge_status": "core", "ping": "core", "dll_status": "core",
+    "list_bridge_methods": "core", "batch_call": "core", "get_audit_log": "core",
+    "list_apis": "core", "table_state": "core", "evaluate_lua": "core",
+    "get_process_info": "core", "open_process": "core", "wait_until": "core",
+    "dialog_enum": "core", "dialog_dismiss": "core",
+
+    # --- memory ---
+    "read_memory": "memory", "read_integer": "memory", "read_string": "memory",
+    "read_pointer": "memory", "read_pointer_chain": "memory",
+    "checksum_memory": "memory", "write_integer": "memory",
+    "write_memory": "memory", "write_string": "memory", "copy_memory": "memory",
+    "compare_memory": "memory", "md5_memory": "memory",
+    "create_section": "memory", "map_view_of_section": "memory",
+    "allocate_memory": "memory", "free_memory": "memory",
+    "allocate_shared_memory": "memory", "get_memory_protection": "memory",
+    "set_memory_protection": "memory", "full_access": "memory",
+
+    # --- scanning (one-shot, persistent sessions, AOB, signatures) ---
+    "scan_all": "scan", "next_scan": "scan", "get_scan_results": "scan",
+    "aob_scan": "scan", "aob_scan_unique": "scan", "aob_scan_module": "scan",
+    "aob_scan_module_unique": "scan", "aob_scan_region": "scan",
+    "search_string": "scan", "diagnose_scan_failure": "scan",
+    "set_signature_tokens": "scan", "get_signature_tokens": "scan",
+    "pointer_rescan": "scan", "generate_signature": "scan",
+    "get_memory_regions": "scan", "enum_memory_regions_full": "scan",
+    "create_persistent_scan": "scan", "persistent_scan_first_scan": "scan",
+    "persistent_scan_next_scan": "scan", "persistent_scan_get_results": "scan",
+    "persistent_scan_destroy": "scan",
+
+    # --- disassembly & static code analysis ---
+    "disassemble": "disasm", "get_instruction_info": "disasm",
+    "find_function_boundaries": "disasm", "analyze_function": "disasm",
+    "find_references": "disasm", "find_call_references": "disasm",
+    "assemble_instruction": "disasm", "get_previous_opcode": "disasm",
+    "get_last_disassemble_data": "disasm",
+
+    # --- debugger & watchpoints ---
+    "set_breakpoint": "debug", "set_data_breakpoint": "debug",
+    "remove_breakpoint": "debug", "list_breakpoints": "debug",
+    "clear_all_breakpoints": "debug", "get_breakpoint_hits": "debug",
+    "debug_get_context": "debug", "debug_set_context": "debug",
+    "debug_get_xmm_pointer": "debug", "debug_set_last_branch_recording": "debug",
+    "debug_get_last_branch_record": "debug",
+    "debug_set_breakpoint_for_thread": "debug",
+    "debug_remove_breakpoint_for_thread": "debug", "debug_process": "debug",
+    "debug_is_debugging": "debug",
+    "debug_get_current_debugger_interface": "debug",
+    "debug_break_thread": "debug", "debug_continue": "debug",
+    "debug_detach": "debug", "start_dbvm_watch": "debug",
+    "stop_dbvm_watch": "debug", "poll_dbvm_watch": "debug",
+
+    # --- process & thread control ---
+    "enum_modules": "process", "get_thread_list": "process",
+    "create_thread": "process", "queue_to_main_thread": "process",
+    "check_synchronize": "process", "in_main_thread": "process",
+    "pause_process": "process", "unpause_process": "process",
+    "get_process_list": "process", "get_processid_from_name": "process",
+    "get_foreground_process": "process", "create_process": "process",
+    "get_opened_process_id": "process", "get_opened_process_handle": "process",
+    "set_speed": "process", "get_speed": "process",
+
+    # --- symbols & address resolution ---
+    "get_symbol_address": "symbols", "get_address_info": "symbols",
+    "get_rtti_classname": "symbols", "get_physical_address": "symbols",
+    "register_symbol": "symbols", "unregister_symbol": "symbols",
+    "enum_registered_symbols": "symbols",
+    "delete_all_registered_symbols": "symbols",
+    "enable_windows_symbols": "symbols", "enable_kernel_symbols": "symbols",
+    "get_symbol_info": "symbols", "get_module_size": "symbols",
+    "load_new_symbols": "symbols", "reinitialize_symbol_handler": "symbols",
+
+    # --- structures (dissected / auto-guessed) ---
+    "dissect_structure": "structures", "create_structure": "structures",
+    "get_structure_by_name": "structures",
+    "add_element_to_structure": "structures",
+    "get_structure_elements": "structures", "export_structure_to_xml": "structures",
+    "delete_structure": "structures", "auto_guess_structure": "structures",
+
+    # --- cheat table & memory records ---
+    "patch_memory_record_script": "table",
+    "undo_memory_record_script_patch": "table",
+    "load_table": "table", "save_table": "table", "get_address_list": "table",
+    "get_memory_record": "table", "create_memory_record": "table",
+    "delete_memory_record": "table", "get_memory_record_value": "table",
+    "set_memory_record_value": "table", "set_memory_record_active": "table",
+    "set_memory_record_address": "table", "set_memory_record_type": "table",
+    "set_memory_record_description": "table", "set_memory_record_script": "table",
+    "set_memory_record_offsets": "table", "get_memory_record_children": "table",
+    "get_memory_record_current_address": "table",
+    "append_memory_record": "table", "table_file_create": "table",
+    "table_file_find": "table", "table_file_export": "table",
+    "table_file_delete": "table",
+
+    # --- Auto Assembler, code generation & injection ---
+    "auto_assemble": "aa", "auto_assemble_check": "aa",
+    "compile_c_code": "aa", "compile_cs_code": "aa",
+    "generate_api_hook_script": "aa", "generate_code_injection_script": "aa",
+    "register_aa_command": "aa", "unregister_aa_command": "aa",
+
+    # --- native code execution & DLL injection ---
+    "output_debug_string": "exec", "inject_dll": "exec",
+    "inject_dotnet_dll": "exec", "execute_code": "exec",
+    "execute_code_ex": "exec", "execute_method": "exec",
+    "execute_code_local": "exec", "execute_code_local_ex": "exec",
+
+    # --- .NET inspection ---
+    "dotnet_status": "dotnet", "dotnet_enum_domains": "dotnet",
+    "dotnet_enum_modules": "dotnet", "dotnet_enum_types": "dotnet",
+    "dotnet_type_details": "dotnet", "dotnet_method_params": "dotnet",
+    "dotnet_address_info": "dotnet", "dotnet_enum_objects": "dotnet",
+
+    # --- code dissect library ---
+    "dissect_code_start": "dissect", "dissect_code_references": "dissect",
+    "dissect_code_strings": "dissect", "dissect_code_functions": "dissect",
+    "dissect_code_manage": "dissect",
+
+    # --- hotkeys & custom value types ---
+    "create_hotkey": "custom", "list_hotkeys": "custom",
+    "remove_hotkey": "custom", "register_custom_type": "custom",
+    "register_custom_type_aa": "custom", "get_custom_type": "custom",
+    "read_custom": "custom", "write_custom": "custom",
+
+    # --- UI inspection, keyboard/mouse input ---
+    "get_pixel": "ui_input", "get_mouse_pos": "ui_input",
+    "set_mouse_pos": "ui_input", "is_key_pressed": "ui_input",
+    "key_down": "ui_input", "key_up": "ui_input", "do_key_press": "ui_input",
+    "get_screen_info": "ui_input", "find_window": "ui_input",
+    "get_window_caption": "ui_input", "get_window_class_name": "ui_input",
+    "get_window_process_id": "ui_input", "send_window_message": "ui_input",
+
+    # --- OS/CE side effects: dialogs, files, clipboard, sound, shell ---
+    "speak_text": "system", "play_sound": "system", "beep": "system",
+    "set_progress_state": "system", "set_progress_value": "system",
+    "get_global_variable": "system", "set_global_variable": "system",
+    "run_command": "system", "shell_execute": "system",
+    "file_exists": "system", "delete_file": "system",
+    "get_file_list": "system", "get_directory_list": "system",
+    "get_temp_folder": "system", "get_file_version": "system",
+    "read_clipboard": "system", "write_clipboard": "system",
+    "show_message": "system", "input_query": "system",
+    "show_selection_list": "system", "write_region_to_file": "system",
+    "read_region_from_file": "system", "md5_file": "system",
+
+    # --- kernel mode (DBK) & DBVM hypervisor ---
+    "dbk_get_cr0": "kernel", "dbk_get_cr3": "kernel", "dbk_get_cr4": "kernel",
+    "read_process_memory_cr3": "kernel", "write_process_memory_cr3": "kernel",
+    "map_memory": "kernel", "unmap_memory": "kernel",
+    "dbk_writes_ignore_write_protection": "kernel",
+    "get_physical_address_cr3": "kernel", "allocate_kernel_memory": "kernel",
+    "dbk_initialize": "kernel", "dbk_use_kernelmode": "kernel",
+    "dbk_read_msr": "kernel", "dbk_write_msr": "kernel",
+    "dbvm_initialize": "kernel", "dbvm_read_msr": "kernel",
+    "dbvm_write_msr": "kernel", "dbvm_cloak_activate": "kernel",
+    "dbvm_cloak_deactivate": "kernel", "dbvm_cloak_read": "kernel",
+    "dbvm_cloak_write": "kernel",
+
+    # --- network ---
+    "http_get": "net", "http_post": "net",
+}
+
+_TOOL_CATEGORY_ORDER = [
+    "core", "memory", "scan", "disasm", "debug", "process", "symbols",
+    "structures", "table", "aa", "exec", "dotnet", "dissect", "custom",
+    "ui_input", "system", "kernel", "net",
+]
+
+# ce_tools_manage is registered directly (not via the recorder) and is
+# therefore always present, even with CE_MCP_TOOLS=core.
+_registered_tool_names = {"ce_tools_manage"}
+_register_lock = threading.Lock()
+
+
+def _resolve_profile(raw_value):
+    """Parse a CE_MCP_TOOLS value into an ordered, validated category list."""
+    raw = (raw_value or "all").strip()
+    if raw.lower() in ("all", "*", ""):
+        return list(_TOOL_CATEGORY_ORDER)
+    cats = []
+    for part in raw.replace(";", ",").split(","):
+        cat = part.strip().lower()
+        if not cat:
+            continue
+        if cat == "minimal":
+            cat = "core"
+        if cat not in _TOOL_CATEGORIES_ORDER_SET:
+            raise ValueError(
+                f"unknown CE_MCP_TOOLS category '{cat}' (valid: all/minimal or "
+                f"{', '.join(_TOOL_CATEGORY_ORDER)})")
+        if cat not in cats:
+            cats.append(cat)
+    if "core" not in cats:
+        cats.insert(0, "core")
+    return cats
+
+
+_TOOL_CATEGORIES_ORDER_SET = set(_TOOL_CATEGORY_ORDER)
+
+
+def _uncategorized_tool_names():
+    return sorted(fn.__name__ for fn in _TOOL_SPECS
+                  if fn.__name__ not in _TOOL_CATEGORIES)
+
+
+def _register_tool_fn(fn):
+    mcp.add_tool(fn)
+    _registered_tool_names.add(fn.__name__)
+
+
+def _notify_tool_list_changed():
+    """Best-effort notifications/tools/list_changed to the connected client.
+
+    Returns (sent: bool, detail: str). Never raises: clients that do not
+    support the notification simply need to re-list or reconnect to see the
+    new tools, and the ce_tools_manage response carries that hint.
+    """
+    session = None
+    try:
+        ctx = mcp.get_context()  # FastMCP 1.x
+        session = getattr(ctx, "session", None)
+    except Exception:
+        session = None
+    if session is None:
+        try:  # mcp 2.x: read the lowlevel server's request contextvar
+            from mcp.server.lowlevel import server as _ll_server
+            rc = _ll_server.request_context.get(None)
+            session = getattr(rc, "session", None)
+        except Exception:
+            session = None
+    if session is None or not hasattr(session, "send_tool_list_changed"):
+        return False, ("no client session available; refresh the tool list "
+                       "(re-list tools or reconnect) to see the new tools")
+    try:
+        import anyio
+        anyio.from_thread.run(session.send_tool_list_changed)
+        return True, "notifications/tools/list_changed sent"
+    except Exception as exc:  # noqa: BLE001 - notification is best-effort
+        return False, f"list_changed notification skipped ({exc}); refresh the tool list manually"
+
+
+def _enable_categories(categories, notify=True):
+    """Register every recorded tool of the given categories. Idempotent.
+
+    Returns (added: list[str], notified: bool, notify_detail: str).
+    """
+    added = []
+    with _register_lock:
+        for cat in categories:
+            for fn in _TOOL_SPECS:
+                name = fn.__name__
+                if _TOOL_CATEGORIES.get(name) == cat and name not in _registered_tool_names:
+                    _register_tool_fn(fn)
+                    added.append(name)
+    if notify and added:
+        notified, detail = _notify_tool_list_changed()
+    else:
+        notified, detail = False, "no notification needed"
+    return added, notified, detail
+
+
+def ce_tools_manage(action: str = "list", categories=None) -> str:
+    """Inspect and progressively load the Cheat Engine toolset (243 tools in 18 categories).
+
+    Only "core" tools are guaranteed registered at start (profile comes from
+    the CE_MCP_TOOLS environment variable). If a tool you need is not in your
+    tool list, load its category here.
+
+    Args:
+        action: "list" (default) - show every category, its tools and which
+                are already enabled. "enabled" - names of registered tools.
+                "enable" - register the given categories now (idempotent).
+        categories: For "enable" only: one category name or a list, e.g.
+                "debug" or ["memory", "debug"]. Valid categories: core,
+                memory, scan, disasm, debug, process, symbols, structures,
+                table, aa, exec, dotnet, dissect, custom, ui_input, system,
+                kernel, net.
+
+    Returns JSON. After "enable", refresh your tool list if the new tools do
+    not appear immediately (a list_changed notification is sent when the
+    client supports it).
+    """
+    action = (action or "list").strip().lower()
+    if action == "enabled":
+        return format_result({
+            "success": True, "action": "enabled",
+            "count": len(_registered_tool_names),
+            "tools": sorted(_registered_tool_names),
+            "total_available": len(_TOOL_SPECS) + 1,
+        })
+    if action == "enable":
+        if isinstance(categories, str):
+            categories = [categories]
+        if not isinstance(categories, list) or not categories:
+            return format_result({
+                "success": False, "action": "enable",
+                "error": "provide a category name or a list of category names",
+                "valid_categories": _TOOL_CATEGORY_ORDER,
+            })
+        try:
+            cats = _resolve_profile(",".join(str(c) for c in categories))
+        except ValueError as exc:
+            return format_result({
+                "success": False, "action": "enable", "error": str(exc),
+                "valid_categories": _TOOL_CATEGORY_ORDER,
+            })
+        cats = [c for c in cats if c != "core"] or cats
+        added, notified, detail = _enable_categories(cats, notify=True)
+        return format_result({
+            "success": True, "action": "enable",
+            "requested_categories": cats,
+            "added": added, "added_count": len(added),
+            "registered_total": len(_registered_tool_names),
+            "list_changed_sent": notified, "list_changed_detail": detail,
+        })
+    if action == "list":
+        catalog = {}
+        for cat in _TOOL_CATEGORY_ORDER:
+            names = sorted(n for n, c in _TOOL_CATEGORIES.items() if c == cat)
+            if cat == "core":
+                names = sorted(set(names) | {"ce_tools_manage"})
+            catalog[cat] = {
+                "count": len(names),
+                "enabled": all(n in _registered_tool_names for n in names),
+                "tools": names,
+            }
+        return format_result({
+            "success": True, "action": "list",
+            "registered_total": len(_registered_tool_names),
+            "total_available": len(_TOOL_SPECS) + 1,
+            "profile_hint": ('set CE_MCP_TOOLS (e.g. "core,memory,debug") '
+                             'or call this tool with action="enable"'),
+            "categories": catalog,
+        })
+    return format_result({
+        "success": False, "error": f"unknown action '{action}'",
+        "valid_actions": ["list", "enabled", "enable"],
+    })
+
+
+mcp.add_tool(ce_tools_manage)
+
+
+def _register_startup_tools():
+    """Register the tool profile selected by CE_MCP_TOOLS (default: all)."""
+    uncategorized = _uncategorized_tool_names()
+    if uncategorized:
+        debug_log(f"WARNING: tools missing from _TOOL_CATEGORIES, registering "
+                  f"them anyway: {', '.join(uncategorized)}")
+    raw = os.environ.get("CE_MCP_TOOLS", "all")
+    cats = _resolve_profile(raw)  # ValueError here is a hard config error
+    added, _, _ = _enable_categories(cats, notify=False)
+    if uncategorized:  # never let a catalog miss hide tools from the agent
+        for fn in _TOOL_SPECS:
+            if fn.__name__ in uncategorized and fn.__name__ not in _registered_tool_names:
+                _register_tool_fn(fn)
+                added.append(fn.__name__)
+    try:
+        del mcp.tool  # restore the real FastMCP.tool for any late registrations
+    except AttributeError:
+        pass
+    debug_log(f"Tool profile '{raw}': {len(_registered_tool_names)}/"
+              f"{len(_TOOL_SPECS) + 1} tools registered "
+              f"(categories: {', '.join(cats)}; SDK: {_MCP_SERVER_MODULE})")
+
+
+_register_startup_tools()
+
 
 if __name__ == "__main__":
     try:

@@ -1,6 +1,6 @@
 # DEV_GUIDE — cheatengine-mcp-tcp-bridge 开发者指南
 
-> 面向维护者与二次开发者。版本基线：Lua bridge **v15.4.2** / Native DLL **v3.3.4**。
+> 面向维护者与二次开发者。版本基线：Lua bridge **v15.6.0** / Native DLL **v3.3.4**。
 > 所有数字（上限、端口、超时）均为代码中的真实常量，非建议值。
 
 ---
@@ -27,7 +27,7 @@
 └──────────────┬──────────────────────────────────────────────────────┘
                │ 进程内 C 函数调用（非 socket，同属 CE 进程）
 ┌──────────────▼──────────────────────────────────────────────────────┐
-│ ce_mcp_bridge.lua v15.5.0 — 运行在 CE 主线程                          │
+│ ce_mcp_bridge.lua v15.6.0 — 运行在 CE 主线程                          │
 │  · 1ms CreateTimer 轮询 mcp_tcp_poll()，每 tick drain 一条待处理命令     │
 │  · executeCommand() → commandHandlers[method] 直查（无 MCP 握手层）    │
 │  · 194 个 cmd_* handler + 203 个注册方法名（含别名）               │
@@ -419,3 +419,50 @@ pcall + 存在性检查降级」原则落地；回调型 API（custom type 转�
 - **mono_\* 函数族**：仅 mono 附加后动态存在，`evaluate_lua` 可直接调用
 - **LCL GUI 全家桶 / d3dhook / LuaPipe / sleep 类**：headless 设计刻意不暴露（GUI 构建与阻塞调用走 `evaluate_lua` 逃生舱）
 - **`unregisterCustomType`**：官方 API 不存在（自定义类型注册后不可注销），`get_custom_type` 可查询避免重名
+
+---
+
+## 14. 分层渐进式工具加载与共享令牌认证（v15.6.0，UNIT-32）
+
+### 背景（竞品对照结论）
+
+对照 tonytranrp/cheat-engine-mcp（Node + 命名管道 + Lua，127 工具）与其衍生讨论后，采纳两点、
+舍弃两点：
+
+- **采纳①**：共享令牌认证（其 `CE_MCP_AUTH_TOKEN` 走管道层）——本桥在 **Lua dispatch 单点**
+  （`executeCommand`）实现，零 DLL 变更；batch 天然被覆盖（batch 是 executeCommand 的一个 handler
+  内循环，外层门禁先行）。
+- **采纳②**：面向 AI 的「推荐工作流」文档（指针追踪 / 函数分析 / CT 表流水线）。
+- **舍弃①**：其 CE-MCP-Plugin 纯 C 文本协议（外连 8888、无帧、无 JSON）——架构劣于本桥的
+  4B LE + JSON + DLL 旁路，无可吸收项。
+- **舍弃②**：DLL 层认证 / 自定义管道名——本桥默认 loopback + 端口扫描 + ping 身份识别已覆盖
+  同等威胁面；Lua 层令牌补足「本地恶意进程」这一剩余缺口。
+
+### 分层加载设计（Python，mcp_cheatengine.py）
+
+- **记录器模式**：`mcp.tool` 在模块体执行期间被实例属性 `_record_tool` 遮蔽——243 个
+  `@mcp.tool()` 装饰器**零改动**，只记录 `(fn)` 到 `_TOOL_SPECS`，不注册。启动注册完成后
+  `del mcp.tool` 恢复真身。
+- **类别目录**：`_TOOL_CATEGORIES`（243 项全覆盖，18 类 + core 常驻），启动时未归类工具
+  兜底注册并打 stderr 警告（绝不静默吞工具）。
+- **剖面**：`CE_MCP_TOOLS=all|minimal|core|core,<cat>...`；未知类别 fail-fast（SystemExit）。
+- **运行时扩展**：常驻 `ce_tools_manage(action=list|enabled|enable)`；`enable` 幂等（集合去重），
+  best-effort 发 `notifications/tools/list_changed`（1.x 走 `mcp.get_context().session`，
+  2.x 走 lowlevel `request_context` contextvar；拿不到会话则返回「请重列/重连」提示）。
+- **SDK 双版本 shim**：mcp 2.x 把 FastMCP 改名 MCPServer（`mcp.server.mcpserver`）；导入时
+  优先 2.x、回退 1.x。Windows CRLF 补丁同时挂到两版的 server 模块命名空间（2.x 的 stdio 仍用
+  TextIOWrapper 且不带 `newline='\n'`，隐患仍在）。requirements 钉 `mcp>=1.0.0,<3`。
+
+### Lua 侧认证门禁
+
+`resolveAuthToken()` 在加载时读 `CE_MCP_AUTH_TOKEN`（getEnvironmentVariable → os.getenv 回退）。
+`executeCommand` 在 handler 查找前校验 `params._auth`，失败返回 `AUTH_REQUIRED`（JSON-RPC
+error envelope）；通过后 `params._auth = nil` 剥离——handler 与审计日志均不见令牌。两端都未设置
+= 原有开放 loopback 行为，向后兼容。
+
+### 测试增量
+
+- Lua：+6（缺 token / 错 token / 对 token / batch 过门 / 审计不泄 token / 复载还原开放态）；
+  测试用函数作用域封装——主 chunk 已逼近 Lua 200 局部变量上限，`do..end` 不够、须独立 function。
+- Python：+11（243 记录数、目录全覆盖、core/minimal/未知剖面、244 注册面、list/enabled 一致性、
+  enable 幂等、token 注入/未设不注入）。

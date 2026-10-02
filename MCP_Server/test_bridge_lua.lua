@@ -47,7 +47,7 @@ end
 
 -- ---------------------------------------------------------------- dispatcher
 print("== version / dispatcher ==")
-ok("version is 15.5.0", MCP_Bridge.version == "15.5.0", MCP_Bridge.version)
+ok("version is 15.6.0", MCP_Bridge.version == "15.6.0", MCP_Bridge.version)
 ok("batch / status / list_methods registered",
    MCP_Bridge.methods.batch and MCP_Bridge.methods.status and MCP_Bridge.methods.list_methods)
 local methodCount = 0
@@ -191,7 +191,7 @@ ok("string shorthand entry rejected as method-not-found",
 -- ------------------------------------------------------------- introspection
 print("== status / list_methods ==")
 local st = req("status")
-ok("status ok", st and st.result.success == true and st.result.version == "15.5.0")
+ok("status ok", st and st.result.success == true and st.result.version == "15.6.0")
 ok("method_count matches dispatcher", st and st.result.method_count == methodCount,
    st and st.result.method_count)
 ok("process_attached reflects CE state", st and st.result.process_attached == false)
@@ -207,7 +207,7 @@ ok("list_methods sorted", lm and lm.result.methods[1] <= lm.result.methods[2])
 local lmp = req("list_methods", { prefix = "dbk" })
 ok("prefix filter", lmp and lmp.result.total == 8 and lmp.result.methods[1] == "dbk_get_cr0",
    lmp and lmp.result.total)
-ok("status alias bridge_status", req("bridge_status").result.version == "15.5.0")
+ok("status alias bridge_status", req("bridge_status").result.version == "15.6.0")
 ok("list alias list_bridge_methods",
    req("list_bridge_methods", { limit = 1 }).result.total == methodCount)
 
@@ -859,6 +859,64 @@ if al31 then for _, e in ipairs(al31.result.entries) do seen[e.method] = true en
 ok("set_speed / create_hotkey / dbvm_cloak_write audited",
    seen["set_speed"] and seen["create_hotkey"] and seen["dbvm_cloak_write"],
    al31 and json.encode(al31.result.entries))
+
+-- ---- auth gate (CE_MCP_AUTH_TOKEN, v15.6.0) ----------------------------------------------------------
+-- Reload the bridge with a stubbed os.getenv so AUTH_TOKEN is resolved as set.
+-- Encapsulated in a function: the main chunk is at Lua's 200-local limit.
+local function auth_gate_tests()
+local real_getenv = os.getenv
+os.getenv = function(k)
+  if k == "CE_MCP_AUTH_TOKEN" then return "sekret-token" end
+  return real_getenv(k)
+end
+dofile((arg and arg[0] and arg[0]:match("^(.*)[/\\]") or ".") .. "/ce_mcp_bridge.lua")
+os.getenv = real_getenv
+
+local function raw_call(method, params)
+  return json.decode(MCP_Bridge.call(method, params))
+end
+
+local denied = raw_call("status", {})
+ok("missing token rejected AUTH_REQUIRED",
+   denied.error and denied.error.data and denied.error.data.error_code == "AUTH_REQUIRED",
+   json.encode(denied))
+
+local wrong = raw_call("status", { _auth = "nope" })
+ok("wrong token rejected AUTH_REQUIRED",
+   wrong.error and wrong.error.data and wrong.error.data.error_code == "AUTH_REQUIRED",
+   json.encode(wrong))
+
+local good = raw_call("status", { _auth = "sekret-token" })
+ok("correct token accepted", good.result and good.result.success == true
+   and good.result.version == "15.6.0", json.encode(good))
+
+local batch_good = raw_call("batch", { _auth = "sekret-token", calls = {
+  { method = "status", params = {} },
+  { method = "dbvm_cloak_write", params = { physical_base = 0x1000, bytes = { 9 } } },
+} })
+ok("batch passes the auth gate",
+   batch_good.result and batch_good.result.succeeded == 2
+   and batch_good.result.results[2].wrote == 1, json.encode(batch_good))
+
+-- token must not leak into the audit log (mutating sub-command above)
+local al_auth = raw_call("get_audit_log", { _auth = "sekret-token", limit = 5 })
+local leaked = false
+if al_auth and al_auth.result then
+  for _, e in ipairs(al_auth.result.entries) do
+    if tostring(e.params and e.params._auth or "") == "sekret-token" then leaked = true end
+  end
+end
+ok("token stripped before audit", not leaked)
+
+-- Reload once more without the token: open access is restored.
+dofile((arg and arg[0] and arg[0]:match("^(.*)[/\\]") or ".") .. "/ce_mcp_bridge.lua")
+local open_again = raw_call("status", {})
+ok("token unset restores open access",
+   open_again.result and open_again.result.success == true, json.encode(open_again))
+end -- auth_gate_tests
+
+print("== auth gate: CE_MCP_AUTH_TOKEN set ==")
+auth_gate_tests()
 
 print(("\n%d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)

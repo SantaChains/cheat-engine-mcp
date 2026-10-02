@@ -15,7 +15,7 @@
 -- CE_TRANSPORT=pipe option no longer has a counterpart here.
 -- ============================================================================
 
-local VERSION = "15.5.0"
+local VERSION = "15.6.0"
 
 local TCP_BASE_PORT = 17171
 -- Security default: loopback only. Remote debugging is opt-in via the
@@ -37,6 +37,26 @@ local function resolveBindAddr()
     end
     return nil
 end
+
+-- Optional shared-token authentication (design borrowed from the
+-- tonytranrp/cheat-engine-mcp bridge, implemented here at the Lua dispatch
+-- layer so the DLL stays untouched). When CE_MCP_AUTH_TOKEN is set, every
+-- request must carry params._auth == token or it is rejected with
+-- AUTH_REQUIRED before any handler runs (batch sub-commands included, since
+-- the check sits in executeCommand, the single entry point). Unset on both
+-- sides = open loopback access (the default).
+local function resolveAuthToken()
+    if type(getEnvironmentVariable) == "function" then
+        local ok, v = pcall(getEnvironmentVariable, "CE_MCP_AUTH_TOKEN")
+        if ok and type(v) == "string" and v ~= "" then return v end
+    end
+    if type(os) == "table" and type(os.getenv) == "function" then
+        local ok, v = pcall(os.getenv, "CE_MCP_AUTH_TOKEN")
+        if ok and type(v) == "string" and v ~= "" then return v end
+    end
+    return nil
+end
+local AUTH_TOKEN = resolveAuthToken()
 
 -- CE constant fallbacks (some CE builds may not expose all globals)
 -- Value types
@@ -8034,6 +8054,18 @@ local function executeCommand(jsonRequest)
     local params = request.params
     if type(params) ~= "table" then params = {} end
     local id = request.id
+
+    -- Shared-token gate (see resolveAuthToken). Stripped from params right
+    -- after the check so handlers and the audit log never see the token.
+    if AUTH_TOKEN ~= nil then
+        if params._auth ~= AUTH_TOKEN then
+            return safeEncode({ jsonrpc = "2.0", id = id,
+                error = { code = -32000, message = "Authentication failed",
+                          data = { error_code = "AUTH_REQUIRED",
+                                   detail = "set CE_MCP_AUTH_TOKEN and send params._auth with every request" } } })
+        end
+        params._auth = nil
+    end
 
     local handler = commandHandlers[method]
     if not handler then

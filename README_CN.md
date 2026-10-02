@@ -2,7 +2,7 @@
 
 # Cheat Engine MCP Bridge — 原生 TCP 版
 
-[![Version](https://img.shields.io/badge/version-15.5.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-原生%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/工具-198-brightgreen.svg)](#可用工具)
+[![Version](https://img.shields.io/badge/version-15.6.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-原生%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/工具-244-brightgreen.svg)](#可用工具)
 
 让你的 AI 助手（Claude、Cursor、Codex、任何 MCP 客户端）直接驱动 **Cheat Engine**：
 读写进程内存、扫描数值、反汇编函数、下断点、注入代码、操作 CT 表——**198 个 MCP 工具**，
@@ -99,7 +99,7 @@ dofile([[C:\path\to\MCP_Server\ce_mcp_bridge.lua]])
 ```
 [MCP] CE x64 - loading ce_mcp_tcp_x64.dll
 [MCP] DLL loaded OK from: C:\Program Files\Cheat Engine\plugins\ce_mcp_tcp_x64.dll
-[MCP] Bridge v15.5.0 started on 127.0.0.1:17171 (native TCP, 1ms poll)
+[MCP] Bridge v15.6.0 started on 127.0.0.1:17171 (native TCP, 1ms poll)
 ```
 
 不会弹出任何窗口——DLL 调试控制台默认隐藏（`CE_MCP_DEBUG_CONSOLE=1` 可显示，且不抢焦点）。
@@ -217,7 +217,7 @@ DLL 默认只绑定 `127.0.0.1`。远程访问需在 CE 机器启动前设置环
 问 AI：*"Ping 一下 Cheat Engine"*
 
 ```json
-{"success": true, "version": "15.5.0", "message": "CE MCP Bridge v15.5.0 alive"}
+{"success": true, "version": "15.6.0", "message": "CE MCP Bridge v15.6.0 alive"}
 ```
 
 ---
@@ -236,35 +236,98 @@ DLL 默认只绑定 `127.0.0.1`。远程访问需在 CE 机器启动前设置环
 | `CE_MCP_ALLOW_SHELL` | *(未设置)* | 设 `1` 启用 `run_command`/`shell_execute` |
 | `CE_MCP_BIND` | `127.0.0.1` | DLL 监听绑定地址；远程调试需在 CE 启动前设 `0.0.0.0` |
 | `CE_MCP_DEBUG_CONSOLE` | *(未设置)* | 设 `1` 显示 DLL 调试控制台（不抢焦点） |
+| `CE_MCP_TOOLS` | `all` | **工具加载剖面**：`all` / `core`（别名 `minimal`）/ `core,memory,debug,...`——见[分层渐进式工具加载](#分层渐进式工具加载) |
+| `CE_MCP_AUTH_TOKEN` | *(未设置)* | 共享令牌认证：两端设同值后，每个请求自动携带 `params._auth`，其余被桥以 `AUTH_REQUIRED` 拒绝 |
 
 > 超时的命令**绝不重试**：它可能已在 CE 内执行过（`write_memory`、`auto_assemble`、`inject_dll`、
 > `execute_code`），重放会把副作用应用两次。超时直接断开 socket。
 
 ---
 
-## 可用工具（198 个 MCP 工具 / 203 个调度方法）
+## 分层渐进式工具加载
 
-Python 侧暴露 **198** 个 `@mcp.tool()` 函数；Lua 调度器解析 **203** 个方法
+244 个工具连同完整 JSON Schema 放进一次 `tools/list`，每次会话启动都会消耗客户端大量上下文。
+服务端因此按**层**加载工具：
+
+- `CE_MCP_TOOLS=all` *（默认）*——全量注册，与旧版行为一致。
+- `CE_MCP_TOOLS=core`（别名 `minimal`）——仅 15 个常驻工具：桥健康（`bridge_status`、`ping`、
+  `dll_status`）、内存 IO 基础、`evaluate_lua`、batch/审计内省、模态框解困
+  （`dialog_enum`/`dialog_dismiss`）以及 `ce_tools_manage`。
+- `CE_MCP_TOOLS=core,memory,debug`——core 加上 18 个类别中任意若干。
+
+运行时通过常驻的 **`ce_tools_manage`** 工具扩展工具面，无需重启：
+
+```json
+{"name": "ce_tools_manage", "arguments": {"action": "list"}}
+{"name": "ce_tools_manage", "arguments": {"action": "enable", "categories": ["memory", "debug"]}}
+```
+
+`enable` 幂等；客户端支持时会收到 `notifications/tools/list_changed` 通知
+（否则重新拉取工具列表或重连即可）。类别：`core`、`memory`、`scan`、`disasm`、`debug`、
+`process`、`symbols`、`structures`、`table`、`aa`、`exec`、`dotnet`、`dissect`、`custom`、
+`ui_input`、`system`、`kernel`、`net`。
+
+---
+
+## 可用工具（244 个注册工具 / 248 个调度方法）
+
+Python 侧记录 **243** 个 `@mcp.tool()` 函数，外加 `ce_tools_manage` 元工具
+（默认共 **244** 个注册）；Lua 调度器解析 **248** 个方法
 （差值是别名，如 `read_bytes` → `read_memory`、`status` → `bridge_status`）。
 
-| 类别 | 示例 |
-|------|------|
-| **内存读写** | `read_memory`, `write_memory`, `read_integer`, `write_string`, `read_pointer_chain` |
-| **扫描** | `scan_all`, `next_scan`, `aob_scan`, `aob_scan_module`, `search_string` |
-| **反汇编与分析** | `disassemble`, `analyze_function`, `find_function_boundaries`, `find_references`, `find_call_references` |
-| **代码注入** | `auto_assemble`, `inject_dll`, `execute_code`, `compile_c_code` |
-| **断点与调试** | `set_breakpoint`, `set_data_breakpoint`, `start_dbvm_watch`, `get_breakpoint_hits` |
-| **进程与模块** | `open_process`, `get_process_list`, `enum_modules`, `get_symbol_address` |
-| **结构体** | `create_structure`, `dissect_structure`, `add_element_to_structure`, `get_rtti_classname` |
-| **内存管理** | `allocate_memory`, `free_memory`, `get_memory_protection`, `get_memory_regions` |
-| **CT 表** | `load_table`, `save_table`, `create_memory_record`, `set_memory_record_active`, `set_memory_record_address`, `set_memory_record_script`, `get_memory_record_children` |
-| **GUI 与输入** | `find_window`, `is_key_pressed`, `get_pixel`, `show_message`, `speak_text` |
-| **文件与系统** | `file_exists`, `md5_file`, `get_file_list`, `evaluate_lua` |
-| **内核（DBK/DBVM）** | `dbk_get_cr3`, `get_physical_address`, `read_process_memory_cr3` |
-| **桥控制** | `batch_call`, `bridge_status`, `list_bridge_methods`, `dll_status`, `dialog_enum`, `dialog_dismiss` |
+| 类别 | 数量 | 示例 |
+|------|------|------|
+| **core**（常驻） | 15 | `bridge_status`, `ping`, `evaluate_lua`, `batch_call`, `dialog_enum`, `ce_tools_manage` |
+| **memory** | 20 | `read_memory`, `write_memory`, `read_pointer_chain`, `allocate_memory`, `set_memory_protection` |
+| **scan** | 21 | `scan_all`, `aob_scan`, `aob_scan_unique`, `pointer_rescan`, `persistent_scan_*`, `generate_signature` |
+| **disasm** | 9 | `disassemble`, `analyze_function`, `find_references`, `get_previous_opcode` |
+| **debug** | 22 | `set_breakpoint`, `debug_get_context`, `debug_continue`, `start_dbvm_watch` |
+| **process** | 16 | `get_process_list`, `pause_process`, `set_speed`, `queue_to_main_thread` |
+| **symbols** | 14 | `get_symbol_address`, `get_symbol_info`, `register_symbol`, `reinitialize_symbol_handler` |
+| **structures** | 8 | `create_structure`, `dissect_structure`, `auto_guess_structure`, `export_structure_to_xml` |
+| **table** | 23 | `load_table`, `save_table`, `create_memory_record`, `set_memory_record_active`, `table_file_*` |
+| **aa** | 8 | `auto_assemble`, `compile_c_code`, `generate_code_injection_script`, `register_aa_command` |
+| **exec** | 8 | `execute_code`, `execute_code_ex`, `inject_dll`, `inject_dotnet_dll` |
+| **dotnet** | 8 | `dotnet_status`, `dotnet_enum_types`, `dotnet_type_details`, `dotnet_enum_objects` |
+| **dissect** | 5 | `dissect_code_start`, `dissect_code_references`, `dissect_code_strings`, `dissect_code_functions` |
+| **custom** | 8 | `create_hotkey`, `register_custom_type`, `read_custom`, `write_custom` |
+| **ui_input** | 13 | `find_window`, `is_key_pressed`, `do_key_press`, `get_mouse_pos`, `send_window_message` |
+| **system** | 23 | `file_exists`, `get_file_list`, `read_clipboard`, `show_message`, `md5_file`, `write_region_to_file` |
+| **kernel** | 21 | `dbk_initialize`, `read_process_memory_cr3`, `dbvm_initialize`, `dbvm_cloak_*` |
+| **net** | 2 | `http_get`, `http_post` |
 
 > **batch 是快路径。** 1ms 主线程轮询 + 同时只有一条命令在途，往返延迟占主导。
 > `batch_call(calls=[{method, params}, ...])` 单次往返跑最多 **64** 条命令，逐项返回结果数组。
+
+### 推荐工作流
+
+**指针追踪**
+
+```json
+// 1. 查谁访问该地址（从上下文拿寄存器值，如 RBX）
+{"name": "set_breakpoint", "arguments": {"address": "0x255D5E758"}}
+{"name": "debug_get_context", "arguments": {}}
+// 2. 用该值做持久化扫描逐轮过滤，直到 game.exe+offset
+{"name": "create_persistent_scan", ...}   // first_scan → next_scan → ...
+// 或已有候选基址时直接指针重扫
+{"name": "pointer_rescan", "arguments": {}}
+```
+
+**函数分析**
+
+```json
+{"name": "find_function_boundaries", "arguments": {"address": "0x14587EDB0"}}
+{"name": "analyze_function", "arguments": {"address": "0x14587EDB0"}}
+{"name": "generate_signature", "arguments": {"address": "0x14587EDB0"}}  // 游戏更新后的特征码
+```
+
+**CT 表流水线**
+
+```json
+{"name": "load_table", "arguments": {"path": "C:/tables/game.CT"}}
+{"name": "get_address_list", "arguments": {}}
+{"name": "set_memory_record_active", "arguments": {"id": 12, "active": true}}
+```
 
 完整参考：[`AI_Context/MCP_Bridge_Command_Reference.md`](AI_Context/MCP_Bridge_Command_Reference.md)
 
@@ -288,7 +351,7 @@ python MCP_Server/test_bridge.py              # 身份、调度 parity、batch�
 python MCP_Server/test_bridge.py --allow-write  # + 分配 / 写入 / 读回
 ```
 
-当前状态：**163/0** Lua 单元断言、**27/0** Python 契约断言、**4/0** 探针自检。
+当前状态：**221/0** Lua 单元断言、**38/0** Python 契约断言、**4/0** 探针自检。
 
 ---
 
