@@ -1,145 +1,95 @@
 **[English](README.md) | [中文](README_CN.md)**
 
-# Cheat Engine MCP Bridge — TCP Enhanced Edition
+# Cheat Engine MCP Bridge — Native TCP Edition
 
 [![Version](https://img.shields.io/badge/version-15.4.1-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-Native%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/tools-198-brightgreen.svg)](#available-tools)
 
-> Based on [miscusi-peek/cheatengine-mcp-bridge](https://github.com/miscusi-peek/cheatengine-mcp-bridge) that replaces Windows Named Pipe with a native C TCP bridge, enabling **remote CE control**, **zero pywin32 dependency**, and **multi-instance support**.
+Let your AI assistant (Claude, Cursor, Codex, any MCP client) drive **Cheat Engine** directly:
+read and write process memory, scan for values, disassemble functions, set breakpoints,
+inject code, and manipulate cheat tables — **198 MCP tools** backed by a native C TCP bridge
+inside Cheat Engine.
 
-[Demo Video](https://github.com/user-attachments/assets/a184a006-f569-4b55-858a-ed80a7139035)
+> Based on [miscusi-peek/cheatengine-mcp-bridge](https://github.com/miscusi-peek/cheatengine-mcp-bridge),
+> rebuilt on a native C TCP transport — remote CE control, zero pywin32 dependency,
+> multi-instance support. See [Credits](#credits).
 
 ---
 
-## This Project vs Original — Key Differences
+## Features
+
+- **198 MCP tools** covering memory, scanning, disassembly, breakpoints, injection, cheat tables, kernel paths
+- **Native C transport** — a small DLL owns a Winsock thread; no `pywin32`, no FFI crashes, static `/MT` CRT (no VC runtime needed)
+- **Remote debugging built-in** — point `CE_HOST` at another machine, no relay scripts
+- **Multi-instance** — auto port discovery (17171–17180), one MCP server can map to one of several CE instances
+- **`batch_call`** — up to 64 commands in a single round trip (the latency fast path)
+- **Machine-readable errors** — every failure carries an `error_code`; timeouts are never blindly retried
+- **Fastpath bypass** — `dll_status` / `dialog_enum` / `dialog_dismiss` answer even while CE's main thread is frozen by a modal dialog
+- **Hidden-by-default debug console** — zero UI interference; set `CE_MCP_DEBUG_CONSOLE=1` to see DLL diagnostics
+- **Tested offline** — 163 Lua unit assertions, 27 Python contract assertions, 4 probe checks; no CE needed to run the suite
 
 ### Architecture
 
 ```
-ORIGINAL (v12.0.0)                         THIS PROJECT (v15.4.1)
-AI Client                                  AI Client
-  │ stdio JSON-RPC                           │ stdio JSON-RPC
-  ▼                                          ▼
-mcp_cheatengine.py                         mcp_cheatengine.py
-  │ Named Pipe (pywin32)                     │ TCP socket (stdlib only)
-  ▼                                          ▼
-\\.\pipe\CE_MCP_Bridge_v99                 ce_mcp_tcp.dll (native C)
-  │ Worker thread (Lua pipe I/O)             │ Winsock2 + select()
-  ▼                                          ▼
-ce_mcp_bridge.lua → Target Process         ce_mcp_bridge.lua → Target Process
+AI client ──(MCP / JSON-RPC over stdio)──▶ mcp_cheatengine.py
+                                                │
+                                                ▼ (4-byte LE length prefix + UTF-8 JSON-RPC)
+                                      127.0.0.1:17171..17180  (TCP, native DLL)
+                                                │
+                                                ▼
+                                   ce_mcp_tcp_{x64,x86}.dll  (own Winsock thread)
+                                                │  1 ms main-thread poll
+                                                ▼
+                                        ce_mcp_bridge.lua (inside Cheat Engine)
+                                                │
+                                                ▼ (CE Lua API / DBVM)
+                                          Target process memory
 ```
-
-### Pros & Cons Comparison
-
-| | Original (v12.0.0) | This Project (v15.4.1) |
-|---|---|---|
-| **Transport** | Named Pipe | Native TCP (C DLL) |
-| **Remote CE** | Requires `ce_tcp_relay.py` relay script | Built-in via `CE_HOST` env var |
-| **Python deps** | `mcp` + `pywin32` | `mcp` only |
-| **Multi-instance** | Not supported | Port auto-increment (17171–17181) |
-| **Timeout** | 30s | 90s, 3x retry + auto-reconnect |
-| **Debug console** | None | Dedicated DLL diagnostic window |
-| **Lua code** | ~6700 lines (FFI/Winsock/Pipe) | ~6600 lines (FFI removed; +batch/self-inspection) |
-| **CRT dependency** | None | Static `/MT` — no VC runtime needed |
-
-| | Original Advantages | This Project Advantages |
-|---|---|---|
-| **Simplicity** | Zero DLL, pip install only | N/A |
-| **Local security** | Named Pipe is local-only by design | N/A |
-| **Remote debugging** | N/A | Native TCP, no relay scripts |
-| **Cross-platform server** | N/A | TCP stdlib works anywhere |
-| **Stability** | N/A | No FFI crashes, no PEB-walk failures |
-| **Multi-CE** | N/A | Auto port discovery |
-
-> **Security**: TCP has **no auth/encryption**. Only expose on trusted networks. Never open port 17171 to the internet.
-
-### Project Structure Comparison
-
-```
-ORIGINAL                                   THIS FORK
-────────                                   ─────────
-MCP_Server/                                MCP_Server/
-├── mcp_cheatengine.py  (pywin32 pipe)     ├── mcp_cheatengine.py   (TCP stdlib, 198 tools)
-├── ce_mcp_bridge.lua   (~6700 lines)      ├── ce_mcp_bridge.lua    (~6600 lines)
-├── ce_tcp_relay.py     (TCP relay)        ├── ce_mcp_tcp_x64.dll   ← NEW: native DLL
-├── test_mcp.py                            ├── ce_mcp_tcp_x86.dll   ← NEW: native DLL
-└── requirements.txt    (mcp + pywin32)    ├── test_bridge_lua.lua  ← NEW: offline Lua tests
-                                           ├── test_bridge.py       ← NEW: client contract/smoke
-                                           └── requirements.txt     (mcp only)
-AI_Context/             (docs)
-                                           NativeBridge/            ← NEW: DLL source
-                                           ├── ce_mcp_tcp.c         (770 lines C)
-                                           ├── build.bat
-                                           └── bin/{x64,x86}/
-
-                                           AI_Context/              (docs)
-```
-
-Key structural differences:
-- **Removed**: `ce_tcp_relay.py` — no longer needed, TCP is native
-- **Removed**: `pywin32` from requirements — TCP uses Python stdlib
-- **Added**: `NativeBridge/` — compiled C DLL source and build system
-- **Added**: Pre-built DLLs in `MCP_Server/` for easy deployment
-- **Added**: Offline + live test harnesses (`test_bridge_lua.lua`, `test_bridge.py`)
-- **Reworked**: Lua bridge — dead FFI/pipe code removed, then `batch`, `status`/`list_methods`
-  self-inspection and central error-code inference added back on top
 
 ---
 
 ## Setup
 
-### 1. Clone the Repository
+### 1. Clone
 
 ```bash
-git clone https://github.com/HollyZoe/cheatengine-mcp-tcp-bridge.git
-cd cheatengine-mcp-tcp-bridge
+git clone https://github.com/SantaChains/cheat-engine-mcp.git
+cd cheat-engine-mcp
 ```
 
 ### 2. Install Python Dependencies
 
 **Prerequisites**: Python 3.10+ ([download](https://python.org/downloads/))
 
-The MCP server requires the `mcp` Python package (Model Context Protocol SDK). This is **not a built-in module** — you must install it manually:
-
 ```bash
 pip install -r MCP_Server/requirements.txt
 ```
 
-Or install directly:
-```bash
-pip install mcp
-```
-
-> If you have multiple Python versions, use `python -m pip install mcp` to ensure it installs to the correct environment.
-
-**Verify the installation succeeded**:
+Verify:
 ```bash
 python -c "from mcp.server.fastmcp import FastMCP; print('OK')"
 ```
 
-If you see `ModuleNotFoundError: No module named 'mcp'`, the install failed — check:
-- You're using the same `python` that Cursor/your AI client will use
-- Try `python -m pip install mcp` instead of just `pip install mcp`
-- On Windows, pip may warn scripts are not on PATH — this is fine, Cursor spawns the server via the `python` command directly
+If you see `ModuleNotFoundError: No module named 'mcp'`, try `python -m pip install mcp` and make sure it installs into the same interpreter your AI client spawns.
 
-> **Note**: TCP transport requires **no** `pywin32`. The legacy Named Pipe transport (and its `pywin32` dependency) was removed in v15.2.1.
+> TCP transport requires **no** `pywin32`.
 
-### 3. Place DLL
+### 3. Place the DLL
 
-Copy `ce_mcp_tcp_x64.dll` (or `_x86.dll` for 32-bit CE) into your **Cheat Engine directory**:
+Copy the DLL matching your Cheat Engine build into the **CE directory**:
 
 ```
 C:\CE 7.5\cheatengine-x86_64.exe
-C:\CE 7.5\ce_mcp_tcp_x64.dll    ← here
+C:\CE 7.5\ce_mcp_tcp_x64.dll    ← here (use _x86.dll for 32-bit CE)
 ```
 
-DLL source: `MCP_Server/` or `NativeBridge/bin/`.
+Prebuilt DLLs ship in `MCP_Server/` (also in `NativeBridge/bin/`).
 
 ### 4. Load in Cheat Engine
 
 1. Attach CE to your target process
 2. `File` → `Execute Script` → open `MCP_Server/ce_mcp_bridge.lua` → `Execute`
 
-Or via Lua console:
+Or via the Lua console:
 ```lua
 dofile([[C:\path\to\MCP_Server\ce_mcp_bridge.lua]])
 ```
@@ -151,7 +101,9 @@ Expected output:
 [MCP] Bridge v15.4.1 started on 127.0.0.1:17171 (native TCP, 1ms poll)
 ```
 
-### 5. Configure AI Client
+No window will pop up — the DLL debug console is hidden by default (`CE_MCP_DEBUG_CONSOLE=1` shows it without stealing focus).
+
+### 5. Configure Your AI Client
 
 <details>
 <summary><b>Cursor IDE</b></summary>
@@ -199,16 +151,18 @@ args = ['C:\path\to\MCP_Server\mcp_cheatengine.py']
 </details>
 
 <details>
-<summary><b>Remote CE</b></summary>
+<summary><b>Remote CE (another machine)</b></summary>
 
 ```json
 { "env": { "CE_HOST": "192.168.1.100", "CE_PORT": "17171" } }
 ```
 
-Firewall on CE machine:
+Firewall on the CE machine:
 ```powershell
 netsh advfirewall firewall add rule name="CE MCP" dir=in action=allow protocol=TCP localport=17171
 ```
+
+By default the DLL binds to `127.0.0.1` only. For remote access set `CE_MCP_BIND=0.0.0.0` in the CE machine's environment before starting CE.
 </details>
 
 ### 6. Verify
@@ -233,7 +187,8 @@ Ask the AI: *"Ping Cheat Engine"*
 | `CE_MCP_RETRY_DELAY` | `0.3` | Seconds between connection retries |
 | `CE_MCP_PROBE_TIMEOUT` | `3.0` | Timeout for the "is this really a CE bridge?" liveness ping |
 | `CE_MCP_ALLOW_SHELL` | *(unset)* | `1` to enable `run_command`/`shell_execute` |
-| `CE_MCP_BIND` | *(unset)* | DLL v3.3.0+: listener bind address, default `127.0.0.1` (loopback only). Set e.g. `0.0.0.0` before CE starts to opt into remote debugging |
+| `CE_MCP_BIND` | `127.0.0.1` | DLL listener bind address; set `0.0.0.0` before CE starts for remote debugging |
+| `CE_MCP_DEBUG_CONSOLE` | *(unset)* | `1` to show the DLL debug console (never steals focus) |
 
 > A timed-out command is **never** retried: it may already have executed inside CE
 > (`write_memory`, `auto_assemble`, `inject_dll`, `execute_code`), so replaying it would apply the
@@ -260,7 +215,7 @@ The Python side exposes **198** `@mcp.tool()` functions; the Lua dispatcher reso
 | **GUI & Input** | `find_window`, `is_key_pressed`, `get_pixel`, `show_message`, `speak_text` |
 | **File & System** | `file_exists`, `md5_file`, `get_file_list`, `evaluate_lua` |
 | **Kernel (DBK/DBVM)** | `dbk_get_cr3`, `get_physical_address`, `read_process_memory_cr3` |
-| **Bridge control** | `batch_call`, `bridge_status`, `list_bridge_methods` |
+| **Bridge control** | `batch_call`, `bridge_status`, `list_bridge_methods`, `dll_status`, `dialog_enum`, `dialog_dismiss` |
 
 > **Batch is the fast path.** With a 1 ms main-thread poll and one command in flight at a time,
 > round trips dominate latency. `batch_call(calls=[{method, params}, ...])` runs up to **64** commands
@@ -289,26 +244,7 @@ python MCP_Server/test_bridge.py              # identity, dispatcher parity, bat
 python MCP_Server/test_bridge.py --allow-write  # + allocate / write / read-back
 ```
 
-| File | Needs CE? | Purpose |
-|------|-----------|---------|
-| `test_bridge_lua.lua` | no | JSON codec, `toHex`, `paginate`, error inference, `batch`, `status`, memory-record manipulation (stubbed AddressList), `evaluate_lua`, UTF-8/CJK matrix, guard paths |
-| `test_bridge.py --self-test` | no | UTF-8 fidelity, timeout-without-retry, connection errors, JSON-RPC unwrapping, oversized-request guard |
-| `probe_bridge.py --self-test` | no | Probe framing/reconnect logic vs an in-process stub mirroring `ce_mcp_tcp.c` |
-| `test_bridge.py` | yes | Live read-only smoke test |
-| `probe_bridge.py` | yes | Live read-only **frame matrix** (13 experiments): envelope shapes, id echo, `-32601`/`-32700` paths, trailing-newline leniency, CJK + large payloads, pipelining, abusive-frame disconnects, post-abuse recovery |
-
-The obsolete `test_mcp.py` (pre-v15 Named Pipe protocol) has been removed; git history retains it.
-
-Current status: **130/0** Lua unit assertions, **27/0** Python contract assertions, **4/0** probe self-test.
-
-### Historical manual results (pre-v15 surface, target: Notepad.exe on Windows 10)
-
-| Result | Count |
-|--------|-------|
-| Passed | **110+** |
-| Fixed during testing | **3** (get_memory_protection, get_memory_regions, debug_get_current_debugger_interface) |
-| CE environment limitation | **5** (compile_c_code, compile_cs_code, load_new_symbols, pointer_rescan, inject_dotnet_dll) |
-| Requires kernel driver | **~20** (skipped — needs signed driver/DBVM) |
+Current status: **163/0** Lua unit assertions, **27/0** Python contract assertions, **4/0** probe self-test.
 
 ---
 
@@ -323,9 +259,9 @@ Current status: **130/0** Lua unit assertions, **27/0** Python contract assertio
 | `error_code: TIMEOUT` | Raise `CE_MCP_TIMEOUT`; the command is **not** retried by design |
 | Non-ASCII / CJK `write_string` fails | Pre-15.1 bug — reload the current `ce_mcp_bridge.lua` in CE |
 | "too many local variables" | Use `dofile(...)` instead of pasting the script |
-| Timeout on heavy ops | Increase `CE_MCP_TIMEOUT` |
 | CE UI freezes | Normal — handlers run on main thread for API safety |
 | Many small calls are slow | Use `batch_call` to collapse them into one round trip |
+| CE frozen by a modal dialog | Use `dialog_enum` + `dialog_dismiss` — they answer even while the main thread is blocked |
 
 ---
 
@@ -337,7 +273,15 @@ Current status: **130/0** Lua unit assertions, **27/0** Python contract assertio
 
 ## Credits
 
-Derived from [miscusi-peek/cheatengine-mcp-bridge](https://github.com/miscusi-peek/cheatengine-mcp-bridge) by [@miscusi-peek](https://github.com/miscusi-peek). Contributors: [@libangli218](https://github.com/libangli218), [@lauralex](https://github.com/lauralex), [@iamtyroon](https://github.com/iamtyroon).
+This project is a deep rework derived from
+[miscusi-peek/cheatengine-mcp-bridge](https://github.com/miscusi-peek/cheatengine-mcp-bridge)
+by [@miscusi-peek](https://github.com/miscusi-peek) — the Lua bridge foundation, MCP server design
+and original tool set all trace back to it. Contributors of the original:
+[@libangli218](https://github.com/libangli218), [@lauralex](https://github.com/lauralex),
+[@iamtyroon](https://github.com/iamtyroon).
+
+This edition replaces the Named Pipe transport with a native C TCP DLL and extends the surface
+to 198 tools. Licensed under the same terms — see [LICENSE](LICENSE).
 
 ## Disclaimer
 
