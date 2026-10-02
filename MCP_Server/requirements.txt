@@ -1,0 +1,9 @@
+# Cheat Engine MCP Bridge - Python Dependencies
+# Install: pip install -r requirements.txt
+
+# MCP SDK (Model Context Protocol) - Required for AI agent communication
+mcp>=1.0.0
+
+# The TCP transport itself is Python stdlib only (socket + json + struct).
+# pywin32 is no longer referenced anywhere: the Named Pipe transport was
+# removed together with the pre-v15 pipe bridge.

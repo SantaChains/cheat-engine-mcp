@@ -1,0 +1,3 @@
+# <gameFileVersion>	<token>	<bytes>   -- use as {token} in patterns/software scripts
+# version '*' = fallback for every game version
+*	MZ	4D 5A
