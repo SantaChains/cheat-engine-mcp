@@ -2948,6 +2948,513 @@ def get_signature_tokens() -> str:
 
 # >>> END UNIT-24 <<<
 
+# >>> BEGIN UNIT-31 CE API gap coverage (v15.5.0) <<<
+# Thin typed tools over the CE Lua APIs added in Lua UNIT-31: speedhack,
+# disassembly context, structure auto-guess, hotkeys, custom value types,
+# code-dissection database, .NET inspection, table files, AA command
+# extensions, HTTP, DBK/DBVM kernel interfaces. See DEV_GUIDE section 13.
+
+@mcp.tool()
+def set_speed(speed: float) -> str:
+    """Set the game speed via the CE speedhack (1.0 = normal, 0.5 = half, 2.0 = double).
+
+    Args:
+        speed: Positive multiplier (e.g. 0.1..10).
+
+    Returns {success, speed}."""
+    return format_result(call("set_speed", {"speed": speed}))
+
+@mcp.tool()
+def get_speed() -> str:
+    """Read the currently set speedhack multiplier.
+
+    Returns {success, speed}."""
+    return format_result(call("get_speed"))
+
+@mcp.tool()
+def get_previous_opcode(address: str) -> str:
+    """Get the address of the opcode preceding the given address (best-effort estimate).
+
+    Args:
+        address: Address (hex string like "0x401000" or number).
+
+    Returns {success, address, previous}."""
+    return format_result(call("get_previous_opcode", {"address": address}))
+
+@mcp.tool()
+def get_last_disassemble_data() -> str:
+    """Read CE's LastDisassembleData table (fields of the most recent disassembly).
+
+    Returns {success, data}."""
+    return format_result(call("get_last_disassemble_data"))
+
+@mcp.tool()
+def auto_guess_structure(name: str, base_address: str, offset: int = 0, size: int = 0) -> str:
+    """Auto-guess structure layout from memory at an address (CE structure dissect autoGuess).
+
+    Args:
+        name: Structure name; created if it does not exist.
+        base_address: Address to guess from (hex string or number).
+        offset: Offset into the structure to start guessing (default 0).
+        size: Size in bytes to guess (0 = CE default heuristics).
+
+    Returns {success, name, base_address, elements}."""
+    return format_result(call("auto_guess_structure",
+                              {"name": name, "base_address": base_address,
+                               "offset": offset, "size": size}))
+
+@mcp.tool()
+def create_hotkey(keys: list, action_lua: str, delay: int = 0) -> str:
+    """Create a CE hotkey (max 5 keys) that runs Lua code when pressed.
+
+    The action runs inside CE on every hotkey activation. Use list/remove to
+    manage; the bridge keeps the hotkey object alive until remove_hotkey.
+
+    Args:
+        keys: Key codes array, e.g. [112, 113] for F1+F2 (VK codes or CE key names).
+        action_lua: Lua source to execute when the hotkey fires.
+        delay: Minimum ms between activations (0 = global delay).
+
+    Returns {success, id, keys}."""
+    return format_result(call("create_hotkey",
+                              {"keys": keys, "action_lua": action_lua, "delay": delay}))
+
+@mcp.tool()
+def list_hotkeys() -> str:
+    """List bridge-managed hotkeys created via create_hotkey.
+
+    Returns {success, hotkeys:[{id}]}."""
+    return format_result(call("list_hotkeys"))
+
+@mcp.tool()
+def remove_hotkey(id: str) -> str:
+    """Destroy a hotkey created via create_hotkey.
+
+    Args:
+        id: Hotkey id returned by create_hotkey (e.g. "hk_1").
+
+    Returns {success, id}."""
+    return format_result(call("remove_hotkey", {"id": id}))
+
+@mcp.tool()
+def register_custom_type(name: str, byte_count: int, bytes_to_value_lua: str,
+                         value_to_bytes_lua: str, is_float: bool = False) -> str:
+    """Register a custom value type from Lua converter functions (for encrypted/encoded values).
+
+    The converters receive raw bytes and must return the decoded value and vice
+    versa, e.g. bytes_to_value_lua="return (b1 ~ 0x5A) + b2*256" (CE Lua bitops).
+    After registration the type can be used in read_custom/write_custom and in
+    memory records.
+
+    Args:
+        name: Unique type name.
+        byte_count: 1..8 bytes per value.
+        bytes_to_value_lua: Lua source "function(b1,b2,...)" body returning a number.
+        value_to_bytes_lua: Lua source returning a byte table for a value.
+        is_float: True if the user-side value is a float.
+
+    Returns {success, name, byte_count}."""
+    return format_result(call("register_custom_type",
+                              {"name": name, "byte_count": byte_count,
+                               "bytes_to_value_lua": bytes_to_value_lua,
+                               "value_to_bytes_lua": value_to_bytes_lua,
+                               "is_float": is_float}))
+
+@mcp.tool()
+def register_custom_type_aa(name: str, script: str) -> str:
+    """Register a custom value type from an Auto Assembler script with ConvertRoutine/ConvertBackRoutine.
+
+    Args:
+        name: Type name to associate (informational).
+        script: AA script allocating ConvertRoutine and ConvertBackRoutine.
+
+    Returns {success, name}."""
+    return format_result(call("register_custom_type_aa", {"name": name, "script": script}))
+
+@mcp.tool()
+def get_custom_type(name: str) -> str:
+    """Check a custom type exists and get registration info.
+
+    Args:
+        name: Type name.
+
+    Returns {success, name, registered_byte_count, uses_float}."""
+    return format_result(call("get_custom_type", {"name": name}))
+
+@mcp.tool()
+def read_custom(address: str, type_name: str, byte_count: int = 0) -> str:
+    """Read bytes at an address and decode them with a registered custom type.
+
+    Args:
+        address: Address (hex string or number).
+        type_name: Registered custom type name.
+        byte_count: Required only if the type was registered via register_custom_type_aa.
+
+    Returns {success, address, type_name, value}."""
+    return format_result(call("read_custom",
+                              {"address": address, "type_name": type_name,
+                               "byte_count": byte_count or None}))
+
+@mcp.tool()
+def write_custom(address: str, type_name: str, value, byte_count: int = 0) -> str:
+    """Encode a value with a registered custom type and write the bytes.
+
+    Args:
+        address: Address (hex string or number).
+        type_name: Registered custom type name.
+        value: Value to encode and write.
+        byte_count: Only needed for AA-registered types.
+
+    Returns {success, address, wrote}."""
+    return format_result(call("write_custom",
+                              {"address": address, "type_name": type_name,
+                               "value": value, "byte_count": byte_count or None}))
+
+@mcp.tool()
+def dissect_code_start(module: str = "", base: str = "", size: int = 0) -> str:
+    """Dissect code to populate CE's code-reference database (DissectCode).
+
+    Provide either a module name or base+size. After this, dissect_code_references /
+    dissect_code_strings / dissect_code_functions query the cached database -
+    far faster than AOB-based find_references.
+
+    Args:
+        module: Module name to dissect (e.g. "game.exe"); takes priority.
+        base: Base address if dissecting a raw range.
+        size: Range size in bytes.
+
+    Returns {success, scope}."""
+    return format_result(call("dissect_code_start",
+                              {"module": module or None,
+                               "base": base or None, "size": size}))
+
+@mcp.tool()
+def dissect_code_references(address: str, offset: int = 0, limit: int = 50) -> str:
+    """Find code that references an address using the dissected database.
+
+    Args:
+        address: Target address (hex string or number).
+        offset: Pagination offset.
+        limit: Max entries.
+
+    Returns {success, references:[{from, type}], total}."""
+    return format_result(call("dissect_code_references",
+                              {"address": address, "offset": offset, "limit": limit}))
+
+@mcp.tool()
+def dissect_code_strings(offset: int = 0, limit: int = 100) -> str:
+    """List strings found by code dissection with their addresses.
+
+    Returns {success, strings:[{address, string}], total}."""
+    return format_result(call("dissect_code_strings", {"offset": offset, "limit": limit}))
+
+@mcp.tool()
+def dissect_code_functions(offset: int = 0, limit: int = 100) -> str:
+    """List functions found by code dissection with their addresses.
+
+    Returns {success, functions:[{address}], total}."""
+    return format_result(call("dissect_code_functions", {"offset": offset, "limit": limit}))
+
+@mcp.tool()
+def dissect_code_manage(action: str, filename: str = "") -> str:
+    """Save / load / clear the code dissection database.
+
+    Args:
+        action: "save" | "load" | "clear".
+        filename: Database file (required for save/load).
+
+    Returns {success, action}."""
+    return format_result(call("dissect_code_manage", {"action": action, "filename": filename}))
+
+@mcp.tool()
+def dotnet_status() -> str:
+    """Check whether the .NET data collector is attached to the target process.
+
+    Returns {success, attached}."""
+    return format_result(call("dotnet_status"))
+
+@mcp.tool()
+def dotnet_enum_domains() -> str:
+    """Enumerate .NET application domains: [{DomainHandle, Name}].
+
+    Returns {success, domains}."""
+    return format_result(call("dotnet_enum_domains"))
+
+@mcp.tool()
+def dotnet_enum_modules(domain_handle: int) -> str:
+    """Enumerate .NET modules in a domain: [{ModuleHandle, BaseAddress, Name}].
+
+    Args:
+        domain_handle: From dotnet_enum_domains.
+
+    Returns {success, modules}."""
+    return format_result(call("dotnet_enum_modules", {"domain_handle": domain_handle}))
+
+@mcp.tool()
+def dotnet_enum_types(module_handle: int) -> str:
+    """Enumerate .NET classes (TypeDefs) in a module: [{TypeDefToken, Name, Flags, Extends}].
+
+    Args:
+        module_handle: From dotnet_enum_modules.
+
+    Returns {success, typedefs}."""
+    return format_result(call("dotnet_enum_types", {"module_handle": module_handle}))
+
+@mcp.tool()
+def dotnet_type_details(domain_handle: int, typedef_token: int) -> str:
+    """Full details of a .NET class: fields (offsets/types/names), methods, parent.
+
+    Args:
+        domain_handle: From dotnet_enum_domains.
+        typedef_token: From dotnet_enum_types.
+
+    Returns {success, fields, methods, parent}."""
+    return format_result(call("dotnet_type_details",
+                              {"domain_handle": domain_handle, "typedef_token": typedef_token}))
+
+@mcp.tool()
+def dotnet_method_params(domain_handle: int, method_token: int) -> str:
+    """Parameter list of a .NET method: [{Name, CType}].
+
+    Args:
+        domain_handle: From dotnet_enum_domains.
+        method_token: MethodDefToken from dotnet_type_details methods.
+
+    Returns {success, parameters}."""
+    return format_result(call("dotnet_method_params",
+                              {"domain_handle": domain_handle, "method_token": method_token}))
+
+@mcp.tool()
+def dotnet_address_info(address: str) -> str:
+    """Inspect a .NET object at an address: class name, fields with offsets.
+
+    Args:
+        address: Object address (hex string or number).
+
+    Returns {success, data}."""
+    return format_result(call("dotnet_address_info", {"address": address}))
+
+@mcp.tool()
+def dotnet_enum_objects(type_name: str = "") -> str:
+    """Enumerate live .NET objects, optionally filtered by type name.
+
+    Args:
+        type_name: Optional full type name filter; empty = all objects.
+
+    Returns {success, objects}."""
+    return format_result(call("dotnet_enum_objects",
+                              {"type_name": type_name or None}))
+
+@mcp.tool()
+def table_file_create(name: str, source_path: str = "") -> str:
+    """Embed a file into the cheat table (CT), optionally reading from disk.
+
+    Args:
+        name: Name inside the table.
+        source_path: File to read; empty creates a blank embedded file.
+
+    Returns {success, name}."""
+    return format_result(call("table_file_create",
+                              {"name": name, "source_path": source_path or None}))
+
+@mcp.tool()
+def table_file_find(name: str) -> str:
+    """Check whether an embedded table file exists.
+
+    Args:
+        name: Embedded file name.
+
+    Returns {success, name}."""
+    return format_result(call("table_file_find", {"name": name}))
+
+@mcp.tool()
+def table_file_export(name: str, dest_path: str) -> str:
+    """Export an embedded table file to disk.
+
+    Args:
+        name: Embedded file name.
+        dest_path: Destination path on disk.
+
+    Returns {success, name, dest}."""
+    return format_result(call("table_file_export", {"name": name, "dest_path": dest_path}))
+
+@mcp.tool()
+def table_file_delete(name: str) -> str:
+    """Delete an embedded table file.
+
+    Args:
+        name: Embedded file name.
+
+    Returns {success, name}."""
+    return format_result(call("table_file_delete", {"name": name}))
+
+@mcp.tool()
+def register_aa_command(command: str, lua_code: str) -> str:
+    """Register a custom Auto Assembler command implemented in Lua.
+
+    The function receives (parameters, syntaxcheckonly) and returns the string
+    that replaces the command during assembly.
+
+    Args:
+        command: New AA command name.
+        lua_code: Lua source of the handler.
+
+    Returns {success, command}."""
+    return format_result(call("register_aa_command", {"command": command, "lua_code": lua_code}))
+
+@mcp.tool()
+def unregister_aa_command(command: str) -> str:
+    """Remove a previously registered custom Auto Assembler command.
+
+    Args:
+        command: Command name.
+
+    Returns {success, command}."""
+    return format_result(call("unregister_aa_command", {"command": command}))
+
+@mcp.tool()
+def http_get(url: str, header: str = "", max_len: int = 65536) -> str:
+    """HTTP GET from inside CE (getInternet). Useful for fetching resources.
+
+    Args:
+        url: Target URL.
+        header: Optional extra header for this request.
+        max_len: Truncate body to this many bytes.
+
+    Returns {success, body, length, truncated}."""
+    return format_result(call("http_get",
+                              {"url": url, "header": header or None,
+                               "max_len": max_len}))
+
+@mcp.tool()
+def http_post(url: str, data: str) -> str:
+    """HTTP POST urlencoded data from inside CE (getInternet).
+
+    Args:
+        url: Target URL.
+        data: URL-encoded payload.
+
+    Returns {success, response}."""
+    return format_result(call("http_post", {"url": url, "data": data}))
+
+@mcp.tool()
+def dbk_initialize() -> str:
+    """Load the DBK kernel driver. Required before kernelmode switches and MSR access.
+
+    Returns {success, loaded}."""
+    return format_result(call("dbk_initialize"))
+
+@mcp.tool()
+def dbk_use_kernelmode(mode: str) -> str:
+    """Switch a Windows API pointer to the DBK kernelmode implementation.
+
+    Args:
+        mode: "openprocess" | "memoryaccess" | "queryregions".
+
+    Returns {success, mode}."""
+    return format_result(call("dbk_use_kernelmode", {"mode": mode}))
+
+@mcp.tool()
+def dbk_read_msr(msr: int) -> str:
+    """Read a model-specific register via the DBK driver (requires dbk_initialize).
+
+    Args:
+        msr: MSR index.
+
+    Returns {success, msr, value}."""
+    return format_result(call("dbk_read_msr", {"msr": msr}))
+
+@mcp.tool()
+def dbk_write_msr(msr: int, value) -> str:
+    """Write a model-specific register via the DBK driver. DANGEROUS: can destabilise the OS.
+
+    Args:
+        msr: MSR index.
+        value: Value to write.
+
+    Returns {success, msr}."""
+    return format_result(call("dbk_write_msr", {"msr": msr, "value": value}))
+
+@mcp.tool()
+def dbvm_initialize(offloados: bool = False, reason: str = "") -> str:
+    """Initialise the DBVM hypervisor (requires DBK driver; offloados boots the OS under DBVM).
+
+    Args:
+        offloados: True to offload the running OS onto DBVM (very invasive).
+        reason: Optional reason string logged by CE.
+
+    Returns {success}."""
+    return format_result(call("dbvm_initialize",
+                              {"offloados": offloados, "reason": reason or None}))
+
+@mcp.tool()
+def dbvm_read_msr(msr: int) -> str:
+    """Read an MSR through DBVM (requires dbvm_initialize).
+
+    Args:
+        msr: MSR index.
+
+    Returns {success, msr, value}."""
+    return format_result(call("dbvm_read_msr", {"msr": msr}))
+
+@mcp.tool()
+def dbvm_write_msr(msr: int, value) -> str:
+    """Write an MSR through DBVM. DANGEROUS: affects the whole system.
+
+    Args:
+        msr: MSR index.
+        value: Value to write.
+
+    Returns {success, msr}."""
+    return format_result(call("dbvm_write_msr", {"msr": msr, "value": value}))
+
+@mcp.tool()
+def dbvm_cloak_activate(physical_base: int, virtual_base: int = 0) -> str:
+    """Activate DBVM cloaking on a 4KB page: the game reads what it expects while CE executes the truth.
+
+    Args:
+        physical_base: Page-aligned physical address.
+        virtual_base: Optional virtual address.
+
+    Returns {success, physical_base}."""
+    return format_result(call("dbvm_cloak_activate",
+                              {"physical_base": physical_base,
+                               "virtual_base": virtual_base or None}))
+
+@mcp.tool()
+def dbvm_cloak_deactivate(physical_base: int) -> str:
+    """Deactivate DBVM cloaking on a page and restore the real memory contents.
+
+    Args:
+        physical_base: Cloaked page's physical address.
+
+    Returns {success, physical_base}."""
+    return format_result(call("dbvm_cloak_deactivate", {"physical_base": physical_base}))
+
+@mcp.tool()
+def dbvm_cloak_read(physical_base: int) -> str:
+    """Read the 4096 bytes the CPU actually executes on a cloaked page (preview: first 64).
+
+    Args:
+        physical_base: Cloaked page's physical address.
+
+    Returns {success, size, preview}."""
+    return format_result(call("dbvm_cloak_read", {"physical_base": physical_base}))
+
+@mcp.tool()
+def dbvm_cloak_write(physical_base: int, bytes: list) -> str:
+    """Write the real bytes executed by the CPU on a cloaked page (1..4096 byte array).
+
+    Args:
+        physical_base: Cloaked page's physical address.
+        bytes: Array of byte values.
+
+    Returns {success, wrote}."""
+    return format_result(call("dbvm_cloak_write",
+                              {"physical_base": physical_base, "bytes": bytes}))
+
+# >>> END UNIT-31 <<<
+
 if __name__ == "__main__":
     try:
         debug_log("Starting FastMCP server (v12/v99 compatible)...")

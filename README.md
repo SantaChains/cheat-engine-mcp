@@ -2,7 +2,7 @@
 
 # Cheat Engine MCP Bridge — Native TCP Edition
 
-[![Version](https://img.shields.io/badge/version-15.4.2-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-Native%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/tools-198-brightgreen.svg)](#available-tools)
+[![Version](https://img.shields.io/badge/version-15.5.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-Native%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/tools-243-brightgreen.svg)](#available-tools)
 
 Let your AI assistant (Claude, Cursor, Codex, any MCP client) drive **Cheat Engine** directly:
 read and write process memory, scan for values, disassemble functions, set breakpoints,
@@ -103,7 +103,7 @@ Expected output:
 ```
 [MCP] CE x64 - loading ce_mcp_tcp_x64.dll
 [MCP] DLL loaded OK from: C:\Program Files\Cheat Engine\plugins\ce_mcp_tcp_x64.dll
-[MCP] Bridge v15.4.2 started on 127.0.0.1:17171 (native TCP, 1ms poll)
+[MCP] Bridge v15.5.0 started on 127.0.0.1:17171 (native TCP, 1ms poll)
 ```
 
 No window will pop up — the DLL debug console is hidden by default (`CE_MCP_DEBUG_CONSOLE=1` shows it without stealing focus).
@@ -225,7 +225,7 @@ By default the DLL binds to `127.0.0.1` only. For remote access set `CE_MCP_BIND
 Ask the AI: *"Ping Cheat Engine"*
 
 ```json
-{"success": true, "version": "15.4.2", "message": "CE MCP Bridge v15.4.2 alive"}
+{"success": true, "version": "15.5.0", "message": "CE MCP Bridge v15.5.0 alive"}
 ```
 
 ---
@@ -251,9 +251,9 @@ Ask the AI: *"Ping Cheat Engine"*
 
 ---
 
-## Available Tools (198 MCP tools / 203 dispatcher methods)
+## Available Tools (243 MCP tools / 248 dispatcher methods)
 
-The Python side exposes **198** `@mcp.tool()` functions; the Lua dispatcher resolves **203** methods
+The Python side exposes **243** `@mcp.tool()` functions; the Lua dispatcher resolves **248** methods
 (the difference is aliases such as `read_bytes` → `read_memory`, `status` → `bridge_status`).
 
 | Category | Examples |
@@ -268,6 +268,16 @@ The Python side exposes **198** `@mcp.tool()` functions; the Lua dispatcher reso
 | **Memory Management** | `allocate_memory`, `free_memory`, `get_memory_protection`, `get_memory_regions` |
 | **Cheat Table** | `load_table`, `save_table`, `create_memory_record`, `set_memory_record_active`, `set_memory_record_address`, `set_memory_record_script`, `get_memory_record_children` |
 | **GUI & Input** | `find_window`, `is_key_pressed`, `get_pixel`, `show_message`, `speak_text` |
+| **Speed & Hotkeys** | `set_speed`, `get_speed`, `create_hotkey`, `remove_hotkey` |
+| **Custom Value Types** | `register_custom_type`, `read_custom`, `write_custom`, `get_custom_type` |
+| **Code Dissection** | `dissect_code_start`, `dissect_code_references`, `dissect_code_strings`, `dissect_code_functions` |
+| **.NET Runtime** | `dotnet_status`, `dotnet_enum_domains`, `dotnet_enum_types`, `dotnet_type_details`, `dotnet_address_info` |
+| **Structure Guessing** | `auto_guess_structure` |
+| **Disassembly Context** | `get_previous_opcode`, `get_last_disassemble_data` |
+| **Table Files** | `table_file_create`, `table_file_export`, `table_file_delete` |
+| **AA Extensions** | `register_aa_command`, `unregister_aa_command` |
+| **Network (from CE)** | `http_get`, `http_post` |
+| **Kernel / DBVM** | `dbk_initialize`, `dbk_use_kernelmode`, `dbvm_initialize`, `dbvm_cloak_activate`, `dbvm_cloak_read` |
 | **File & System** | `file_exists`, `md5_file`, `get_file_list`, `evaluate_lua` |
 | **Kernel (DBK/DBVM)** | `dbk_get_cr3`, `get_physical_address`, `read_process_memory_cr3` |
 | **Bridge control** | `batch_call`, `bridge_status`, `list_bridge_methods`, `dll_status`, `dialog_enum`, `dialog_dismiss` |

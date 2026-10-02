@@ -47,7 +47,7 @@ end
 
 -- ---------------------------------------------------------------- dispatcher
 print("== version / dispatcher ==")
-ok("version is 15.4.2", MCP_Bridge.version == "15.4.2", MCP_Bridge.version)
+ok("version is 15.5.0", MCP_Bridge.version == "15.5.0", MCP_Bridge.version)
 ok("batch / status / list_methods registered",
    MCP_Bridge.methods.batch and MCP_Bridge.methods.status and MCP_Bridge.methods.list_methods)
 local methodCount = 0
@@ -191,7 +191,7 @@ ok("string shorthand entry rejected as method-not-found",
 -- ------------------------------------------------------------- introspection
 print("== status / list_methods ==")
 local st = req("status")
-ok("status ok", st and st.result.success == true and st.result.version == "15.4.2")
+ok("status ok", st and st.result.success == true and st.result.version == "15.5.0")
 ok("method_count matches dispatcher", st and st.result.method_count == methodCount,
    st and st.result.method_count)
 ok("process_attached reflects CE state", st and st.result.process_attached == false)
@@ -205,9 +205,9 @@ ok("list_methods total == method_count", lm and lm.result.total == methodCount, 
 ok("list_methods page size", lm and lm.result.returned == 5 and #lm.result.methods == 5)
 ok("list_methods sorted", lm and lm.result.methods[1] <= lm.result.methods[2])
 local lmp = req("list_methods", { prefix = "dbk" })
-ok("prefix filter", lmp and lmp.result.total == 4 and lmp.result.methods[1] == "dbk_get_cr0",
+ok("prefix filter", lmp and lmp.result.total == 8 and lmp.result.methods[1] == "dbk_get_cr0",
    lmp and lmp.result.total)
-ok("status alias bridge_status", req("bridge_status").result.version == "15.4.2")
+ok("status alias bridge_status", req("bridge_status").result.version == "15.5.0")
 ok("list alias list_bridge_methods",
    req("list_bridge_methods", { limit = 1 }).result.total == methodCount)
 
@@ -610,6 +610,255 @@ local methods = {}
 if al then for _, e in ipairs(al.result.entries) do methods[e.method] = true end end
 ok("patch + undo audited", methods["patch_memory_record_script"] and methods["undo_memory_record_script_patch"],
    al and json.encode(al.result.entries))
+
+-- ============================================================================
+-- UNIT-31: CE API gap coverage (speed / custom types / dissect / dotnet /
+-- hotkeys / table files / AA commands / HTTP / DBK / DBVM)
+-- ============================================================================
+
+-- ---- CE API stubs for this unit ----------------------------------------------
+local stub_state = { speed = 1, prevOpcode = 0x401000, lastData = { line = "mov eax,1" } }
+speedhack_setSpeed = function(v) stub_state.speed = v return true end
+speedhack_getSpeed = function() return stub_state.speed end
+getPreviousOpcode  = function(a) return stub_state.prevOpcode end
+getLastDisassembleData = function() return stub_state.lastData end
+
+local mk_hotkey = { destroyed = 0 }
+createHotkey = function(fn, keys)
+  assert(type(fn) == "function" and type(keys) == "table")
+  return { destroy = function() mk_hotkey.destroyed = mk_hotkey.destroyed + 1 end }
+end
+
+local ct_state = { bytes = nil, value = nil }
+registerCustomTypeLua = function(name, n, b2v, v2b, isFloat)
+  ct_state.name, ct_state.n, ct_state.isFloat = name, n, isFloat
+  ct_state.obj = {
+    byteTableToValue  = function(self, bytes) return 12345 end,
+    valueToByteTable  = function(self, v) return { 0x39, 0x30, 0, 0 } end,
+  }
+  return ct_state.obj
+end
+getCustomType = function(name)
+  if ct_state.name == name then return ct_state.obj or { scriptUsesFloat = false } end
+  return nil
+end
+
+readBytes  = function(addr, n, asTable)
+  assert(asTable == true)
+  return { 0x39, 0x30, 0x00, 0x00 }
+end
+writeBytes = function(addr, bytes) ct_state.wrote = #bytes return true end
+
+local dotnet_state = { domains = { { 1234, "root" } } }
+getDotNetDataCollector = function()
+  return {
+    Attached = true,
+    enumDomains = function(self) return dotnet_state.domains end,
+    enumModuleList = function(self, dh) return { { 5678, 0x400000, "game.dll" } } end,
+  }
+end
+
+local dissect_state = { calls = {} }
+getDissectCode = function()
+  return {
+    dissect = function(self, a, b) dissect_state.calls[#dissect_state.calls+1] = a return true end,
+    getReferences = function(self, addr) return { [0x401500] = "jtCall" } end,
+    getReferencedStrings = function(self) return { [0x403000] = "hello" } end,
+    getReferencedFunctions = function(self) return { [0x401000] = true } end,
+    saveToFile = function(self, f) return true end,
+    loadFromFile = function(self, f) return true end,
+    clear = function(self) return true end,
+  }
+end
+
+local tf_state = { files = {} }
+createTableFile = function(name, path) tf_state.files[name] = path return { name = name } end
+findTableFile = function(name)
+  if tf_state.files[name] ~= nil then return { name = name } end
+  return nil
+end
+-- export/delete need the real object's methods; patch findTableFile to return them
+local real_find_stub = findTableFile
+findTableFile = function(name)
+  local exists = tf_state.files[name] ~= nil
+  if not exists then return nil end
+  return {
+    saveToFile = function(self, dest) tf_state.exported = dest return true end,
+    delete = function(self) tf_state.files[name] = nil return true end,
+  }
+end
+
+local aa_state = { registered = {}, unregistered = {} }
+registerAutoAssemblerCommand   = function(cmd, fn) aa_state.registered[cmd] = fn return true end
+unregisterAutoAssemblerCommand = function(cmd) aa_state.unregistered[cmd] = true return true end
+
+getInternet = function(agent)
+  return {
+    getURL = function(self, url) return "BODY:" .. url end,
+    postURL = function(self, url, data) return "POSTED" end,
+  }
+end
+
+local dbk_state = { init = false }
+dbk_initialize = function() dbk_state.init = true return true end
+dbk_useKernelmodeOpenProcess = function() return true end
+dbk_readMSR = function(m) return 0xDEADBEEF end
+dbvm_initialize = function(offload, reason) return true end
+dbvm_readMSR = function(m) return 0xCAFEBABE end
+dbvm_cloak_readOriginal = function(phys)
+  local t = {}
+  for i = 1, 4096 do t[i] = 0x90 end
+  return t
+end
+dbvm_cloak_writeOriginal = function(phys, bytes) return true end
+
+local st_state = { count = 3 }
+getStructureByName = function(name) return nil end
+createStructure = function(name, addToGlobal)
+  return { autoGuess = function(self, base, off, size) st_state.guessed = base end,
+           Count = st_state.count }
+end
+
+-- ---- speedhack ----------------------------------------------------------------
+local sp1 = req("set_speed", { speed = 2.5 })
+ok("set_speed ok", sp1 and sp1.result.success == true and stub_state.speed == 2.5)
+local sp2 = req("get_speed", {})
+ok("get_speed echoes 2.5", sp2 and sp2.result.speed == 2.5)
+local sp3 = req("set_speed", { speed = -1 })
+ok("set_speed rejects non-positive", sp3 and sp3.result.error_code == "INVALID_PARAMS")
+
+-- ---- disassembly context --------------------------------------------------------
+local po = req("get_previous_opcode", { address = "0x401100" })
+ok("get_previous_opcode hex", po and po.result.previous == "0x401000", po and json.encode(po.result))
+local ld = req("get_last_disassemble_data", {})
+ok("get_last_disassemble_data table", ld and ld.result.data and ld.result.data.line == "mov eax,1")
+
+-- ---- structure auto-guess ---------------------------------------------------------
+local ag = req("auto_guess_structure", { name = "MyStruct", base_address = "0x401000", size = 64 })
+ok("auto_guess_structure", ag and ag.result.success == true and ag.result.elements == 3,
+   ag and json.encode(ag.result))
+local ag2 = req("auto_guess_structure", { base_address = "0x401000" })
+ok("auto_guess needs name", ag2 and ag2.result.error_code == "INVALID_PARAMS")
+
+-- ---- hotkeys -----------------------------------------------------------------------
+local hk1 = req("create_hotkey", { keys = { 112, 113 }, action_lua = "return 1" })
+ok("create_hotkey ok", hk1 and hk1.result.success == true and hk1.result.id == "hk_1",
+   hk1 and json.encode(hk1.result))
+local hk2 = req("create_hotkey", { keys = {}, action_lua = "return 1" })
+ok("create_hotkey rejects empty keys", hk2 and hk2.result.error_code == "INVALID_PARAMS")
+local hk3 = req("create_hotkey", { keys = { 112 }, action_lua = "return )))" })
+ok("create_hotkey rejects bad lua", hk3 and hk3.result.error_code == "INVALID_PARAMS")
+local hkl = req("list_hotkeys", {})
+ok("list_hotkeys shows 1", hkl and hkl.result.total == 1)
+local hkd = req("remove_hotkey", { id = "hk_1" })
+ok("remove_hotkey ok", hkd and hkd.result.success == true and mk_hotkey.destroyed == 1)
+local hkx = req("remove_hotkey", { id = "hk_99" })
+ok("remove_hotkey NOT_FOUND", hkx and hkx.result.error_code == "NOT_FOUND")
+
+-- ---- custom types ---------------------------------------------------------------------
+local ct1 = req("register_custom_type", { name = "xor4", byte_count = 4,
+  bytes_to_value_lua = "return 12345", value_to_bytes_lua = "return {1,2,3,4}" })
+ok("register_custom_type ok", ct1 and ct1.result.success == true, ct1 and json.encode(ct1.result))
+local ct2 = req("register_custom_type", { name = "bad", byte_count = 9,
+  bytes_to_value_lua = "return 1", value_to_bytes_lua = "return {1}" })
+ok("register_custom_type rejects byte_count>8", ct2 and ct2.result.error_code == "INVALID_PARAMS")
+local ct3 = req("register_custom_type", { name = "bad2", byte_count = 4,
+  bytes_to_value_lua = "return )))", value_to_bytes_lua = "return {1}" })
+ok("register_custom_type rejects bad lua", ct3 and ct3.result.error_code == "INVALID_PARAMS")
+local cti = req("get_custom_type", { name = "xor4" })
+ok("get_custom_type found", cti and cti.result.success == true and cti.result.registered_byte_count == 4)
+local rc = req("read_custom", { address = "0x401000", type_name = "xor4" })
+ok("read_custom value", rc and rc.result.success == true and rc.result.value == 12345,
+   rc and json.encode(rc.result))
+local wc = req("write_custom", { address = "0x401000", type_name = "xor4", value = 7 })
+ok("write_custom wrote 4 bytes", wc and wc.result.success == true and wc.result.wrote == 4,
+   wc and json.encode(wc.result))
+local rcn = req("read_custom", { address = "0x401000", type_name = "nope" })
+ok("read_custom NOT_FOUND type", rcn and rcn.result.error_code == "NOT_FOUND")
+
+-- ---- dissect code ------------------------------------------------------------------------
+local ds1 = req("dissect_code_start", { module = "game.exe" })
+ok("dissect_code_start by module", ds1 and ds1.result.success == true)
+local ds2 = req("dissect_code_start", {})
+ok("dissect_code_start needs scope", ds2 and ds2.result.error_code == "INVALID_PARAMS")
+local dr = req("dissect_code_references", { address = "0x401000" })
+ok("dissect_code_references", dr and dr.result.total == 1 and dr.result.references[1].from == "0x401500",
+   dr and json.encode(dr.result))
+local dstr = req("dissect_code_strings", {})
+ok("dissect_code_strings", dstr and dstr.result.total == 1 and dstr.result.strings[1].string == "hello")
+local dfn = req("dissect_code_functions", {})
+ok("dissect_code_functions", dfn and dfn.result.total == 1 and dfn.result.functions[1].address == "0x401000")
+local dsv = req("dissect_code_manage", { action = "save", filename = "dc.bin" })
+ok("dissect_code_manage save", dsv and dsv.result.success == true)
+local dcx = req("dissect_code_manage", { action = "bogus" })
+ok("dissect_code_manage bogus action", dcx and dcx.result.error_code == "INVALID_PARAMS")
+
+-- ---- dotnet ---------------------------------------------------------------------------------
+local dn1 = req("dotnet_status", {})
+ok("dotnet_status attached", dn1 and dn1.result.attached == true)
+local dn2 = req("dotnet_enum_domains", {})
+ok("dotnet_enum_domains", dn2 and dn2.result.domains[1][2] == "root")
+local dn3 = req("dotnet_enum_modules", { domain_handle = 1234 })
+ok("dotnet_enum_modules", dn3 and dn3.result.modules[1][3] == "game.dll")
+local dn4 = req("dotnet_enum_modules", {})
+ok("dotnet_enum_modules needs handle", dn4 and dn4.result.error_code == "INVALID_PARAMS")
+
+-- ---- table files ------------------------------------------------------------------------------
+local tf1 = req("table_file_create", { name = "data.bin", source_path = [[C:\tmp\data.bin]] })
+ok("table_file_create", tf1 and tf1.result.success == true)
+local tf2 = req("table_file_find", { name = "data.bin" })
+ok("table_file_find", tf2 and tf2.result.success == true)
+local tf3 = req("table_file_export", { name = "data.bin", dest_path = [[C:\out\data.bin]] })
+ok("table_file_export", tf3 and tf3.result.success == true and tf3.result.dest == [[C:\out\data.bin]])
+local tf4 = req("table_file_delete", { name = "data.bin" })
+ok("table_file_delete", tf4 and tf4.result.success == true)
+local tf5 = req("table_file_find", { name = "data.bin" })
+ok("table_file_find after delete NOT_FOUND", tf5 and tf5.result.error_code == "NOT_FOUND")
+
+-- ---- AA commands --------------------------------------------------------------------------------
+local aa1 = req("register_aa_command", { command = "mymov", lua_code = "return 'mov eax,1'" })
+ok("register_aa_command", aa1 and aa1.result.success == true and aa_state.registered["mymov"] ~= nil)
+local aa2 = req("register_aa_command", { command = "bad", lua_code = "return )))" })
+ok("register_aa_command rejects bad lua", aa2 and aa2.result.error_code == "INVALID_PARAMS")
+local aa3 = req("unregister_aa_command", { command = "mymov" })
+ok("unregister_aa_command", aa3 and aa3.result.success == true and aa_state.unregistered["mymov"] == true)
+
+-- ---- HTTP -----------------------------------------------------------------------------------------
+local h1 = req("http_get", { url = "http://example.com/x" })
+ok("http_get", h1 and h1.result.success == true and h1.result.body == "BODY:http://example.com/x")
+local h2 = req("http_get", {})
+ok("http_get needs url", h2 and h2.result.error_code == "INVALID_PARAMS")
+local h3 = req("http_post", { url = "http://example.com", data = "a=1" })
+ok("http_post", h3 and h3.result.success == true and h3.result.response == "POSTED")
+
+-- ---- DBK / DBVM -------------------------------------------------------------------------------------
+local d1 = req("dbk_initialize", {})
+ok("dbk_initialize", d1 and d1.result.success == true and d1.result.loaded == true)
+local d2 = req("dbk_use_kernelmode", { mode = "openprocess" })
+ok("dbk_use_kernelmode", d2 and d2.result.success == true)
+local d3 = req("dbk_use_kernelmode", { mode = "bogus" })
+ok("dbk_use_kernelmode rejects bad mode", d3 and d3.result.error_code == "INVALID_PARAMS")
+local d4 = req("dbk_read_msr", { msr = 0x10 })
+ok("dbk_read_msr", d4 and d4.result.success == true and d4.result.value == 0xDEADBEEF)
+local d5 = req("dbvm_initialize", { offloados = false })
+ok("dbvm_initialize", d5 and d5.result.success == true)
+local d6 = req("dbvm_read_msr", { msr = 0x10 })
+ok("dbvm_read_msr", d6 and d6.result.value == 0xCAFEBABE)
+local d7 = req("dbvm_cloak_read", { physical_base = 0x1000 })
+ok("dbvm_cloak_read 4096 bytes", d7 and d7.result.size == 4096 and #d7.result.preview == 64,
+   d7 and json.encode(d7.result))
+local d8 = req("dbvm_cloak_write", { physical_base = 0x1000, bytes = { 1, 2, 3 } })
+ok("dbvm_cloak_write", d8 and d8.result.wrote == 3)
+local d9 = req("dbvm_cloak_write", { physical_base = 0x1000, bytes = {} })
+ok("dbvm_cloak_write rejects empty", d9 and d9.result.error_code == "INVALID_PARAMS")
+
+-- ---- audit coverage for new mutating prefixes --------------------------------------------------------
+local al31 = req("get_audit_log", { limit = 200 })
+local seen = {}
+if al31 then for _, e in ipairs(al31.result.entries) do seen[e.method] = true end end
+ok("set_speed / create_hotkey / dbvm_cloak_write audited",
+   seen["set_speed"] and seen["create_hotkey"] and seen["dbvm_cloak_write"],
+   al31 and json.encode(al31.result.entries))
 
 print(("\n%d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)

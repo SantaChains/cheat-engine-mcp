@@ -15,7 +15,7 @@
 -- CE_TRANSPORT=pipe option no longer has a counterpart here.
 -- ============================================================================
 
-local VERSION = "15.4.2"
+local VERSION = "15.5.0"
 
 local TCP_BASE_PORT = 17171
 -- Security default: loopback only. Remote debugging is opt-in via the
@@ -285,6 +285,7 @@ local AUDIT_MUTATING_PREFIXES = {
     "auto_assemble", "compile_", "map_memory", "unmap_memory", "copy_memory",
     "free_memory", "allocate_", "full_access", "key_down", "key_up",
     "do_key_press", "shell_execute", "dbk_writes_", "patch_", "undo_",
+    "remove_", "dbk_", "dbvm_", "dissect_code_load", "dissect_code_clear",
 }
 
 local function isMutatingMethod(method)
@@ -6853,6 +6854,854 @@ function cmd_list_methods(params)
     local limit, offset, page, total = paginate(params, names, 500)
     return { success = true, total = total, offset = offset, limit = limit, returned = #page, methods = page }
 end
+
+-- >>> BEGIN UNIT-31 CE API Gap Coverage (v15.5.0) <<<
+-- ============================================================================
+-- COMMAND HANDLERS - CE API GAP COVERAGE
+-- Thin adapters over documented CE Lua APIs that the v15.4.x surface lacked
+-- (audited against the official celua.txt): speedhack, disassembly context,
+-- structure auto-guess, hotkeys, custom value types, the code-dissection
+-- database, .NET runtime inspection, embedded table files, AA command
+-- extensions, HTTP, and the DBK/DBVM kernel interfaces.
+--
+-- Design rules for this unit:
+--   * Zero new dependencies - every handler wraps a documented CE global or
+--     class method; CE itself is the library.
+--   * Callback-style APIs (custom type converters, hotkey actions, AA
+--     commands) receive Lua source strings that are compiled with load().
+--     They run inside CE's sandbox exactly like evaluate_lua payloads and are
+--     audited via the register_/create_/set_ mutating prefixes.
+--   * Every CE global is existence-checked (CE_API_UNAVAILABLE) and called
+--     under pcall (CE_API_ERROR) so headless tests and older CE builds
+--     degrade cleanly instead of throwing.
+-- ============================================================================
+
+gapHotkeys        = {}   -- id -> GenericHotkey object (keeps them alive)
+gapHotkeySeq      = 0
+gapCustomTypes    = {}   -- name -> byte count (for read_custom/write_custom)
+
+-- Shared guards for this unit -------------------------------------------------
+local function gapApi(name)
+    local v = rawget(_G, name)
+    if type(v) ~= "function" then
+        return nil, { success = false, error = name .. " is not available in this CE build",
+                      error_code = "CE_API_UNAVAILABLE" }
+    end
+    return v
+end
+
+local function gapCall(name, ...)
+    local fn, err = gapApi(name)
+    if not fn then return err end
+    local ok, res = pcall(fn, ...)
+    if not ok then
+        return { success = false, error = name .. " failed: " .. tostring(res),
+                 error_code = "CE_API_ERROR" }
+    end
+    return res
+end
+
+-- Resolve "address" param (number or hex string) -> number, else error table.
+local function gapAddr(params, key)
+    local a = params[key or "address"]
+    if type(a) == "number" then return a end
+    if type(a) == "string" then
+        local n = getAddressSafe(a)
+        if n then return n end
+    end
+    return nil, { success = false, error = "Invalid or missing '" .. (key or "address") .. "'",
+                  error_code = "INVALID_ADDRESS" }
+end
+
+-- ---- Speedhack (speedhack_setSpeed / speedhack_getSpeed) --------------------
+
+function cmd_set_speed(params)
+    local speed = tonumber(params.speed)
+    if not speed or speed <= 0 then
+        return { success = false, error = "speed must be a positive number", error_code = "INVALID_PARAMS" }
+    end
+    local res = gapCall("speedhack_setSpeed", speed)
+    if type(res) == "table" then return res end
+    return { success = true, speed = speed }
+end
+
+function cmd_get_speed()
+    local res = gapCall("speedhack_getSpeed")
+    if type(res) == "table" then return res end
+    return { success = true, speed = tonumber(res) }
+end
+
+-- ---- Disassembly context -----------------------------------------------------
+
+function cmd_get_previous_opcode(params)
+    local addr, err = gapAddr(params)
+    if not addr then return err end
+    local res = gapCall("getPreviousOpcode", addr)
+    if type(res) == "table" then return res end
+    return { success = true, address = toHex(addr), previous = res and toHex(res) or nil }
+end
+
+function cmd_get_last_disassemble_data()
+    local res = gapCall("getLastDisassembleData")
+    if type(res) == "table" and res.error_code then return res end
+    if res == nil then return { success = true, data = nil } end
+    return { success = true, data = res }
+end
+
+-- ---- Structure auto-guess (structure.autoGuess) -------------------------------
+
+function cmd_auto_guess_structure(params)
+    local name = params.name
+    if type(name) ~= "string" or name == "" then
+        return { success = false, error = "name is required", error_code = "INVALID_PARAMS" }
+    end
+    local base, err = gapAddr(params, "base_address")
+    if not base then return err end
+    local offset = tonumber(params.offset) or 0
+    local size   = tonumber(params.size) or 0
+
+    local fn = gapApi("getStructureByName")
+    if not fn then return { success = false, error = "getStructureByName unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local okS, st = pcall(fn, name)
+    if not okS then st = nil end
+    if not st then
+        local mk = gapApi("createStructure")
+        if not mk then return { success = false, error = "createStructure unavailable", error_code = "CE_API_UNAVAILABLE" } end
+        local okC, created = pcall(mk, name, true)
+        if not okC or not created then
+            return { success = false, error = "cannot create structure '" .. name .. "'", error_code = "CE_API_ERROR" }
+        end
+        st = created
+    end
+
+    local okG, gerr = pcall(function() st.autoGuess(st, base, offset, size) end)
+    if not okG then
+        return { success = false, error = "autoGuess failed: " .. tostring(gerr), error_code = "CE_API_ERROR" }
+    end
+    local count = 0
+    pcall(function() count = tonumber(st.Count) or 0 end)
+    return { success = true, name = name, base_address = toHex(base), elements = count }
+end
+
+-- ---- Hotkeys (createHotkey / GenericHotkey) -----------------------------------
+
+function cmd_create_hotkey(params)
+    local keys = params.keys
+    if type(keys) ~= "table" or #keys == 0 then
+        return { success = false, error = "keys must be a non-empty array (max 5)", error_code = "INVALID_PARAMS" }
+    end
+    if #keys > 5 then
+        return { success = false, error = "CE hotkeys accept at most 5 keys", error_code = "INVALID_PARAMS" }
+    end
+    if type(params.action_lua) ~= "string" or params.action_lua == "" then
+        return { success = false, error = "action_lua (Lua source) is required", error_code = "INVALID_PARAMS" }
+    end
+    local mk = gapApi("createHotkey")
+    if not mk then return { success = false, error = "createHotkey unavailable", error_code = "CE_API_UNAVAILABLE" } end
+
+    local chunk, cerr = load(params.action_lua, "hotkey_action", "t")
+    if not chunk then
+        return { success = false, error = "action_lua compile error: " .. tostring(cerr), error_code = "INVALID_PARAMS" }
+    end
+
+    local okH, hk = pcall(mk, chunk, keys)
+    if not okH or not hk then
+        return { success = false, error = "createHotkey failed: " .. tostring(hk), error_code = "CE_API_ERROR" }
+    end
+    if params.delay and tonumber(params.delay) then
+        pcall(function() hk.DelayBetweenActivate = tonumber(params.delay) end)
+    end
+
+    gapHotkeySeq = gapHotkeySeq + 1
+    local id = "hk_" .. gapHotkeySeq
+    gapHotkeys[id] = hk
+    return { success = true, id = id, keys = keys, delay = tonumber(params.delay) }
+end
+
+function cmd_list_hotkeys(params)
+    params = params or {}
+    local items = {}
+    for id in pairs(gapHotkeys) do
+        items[#items + 1] = { id = id }
+    end
+    local limit, offset, _, total = paginate(params, items, 100)
+    local out = {}
+    for i = offset + 1, math.min(offset + limit, #items) do out[#out + 1] = items[i] end
+    return { success = true, total = total, offset = offset, limit = limit,
+             returned = #out, hotkeys = out }
+end
+
+function cmd_remove_hotkey(params)
+    local id = params.id
+    local hk = id and gapHotkeys[id] or nil
+    if not hk then
+        return { success = false, error = "unknown hotkey id", error_code = "NOT_FOUND" }
+    end
+    pcall(function() hk.destroy() end)
+    gapHotkeys[id] = nil
+    return { success = true, id = id }
+end
+
+-- ---- Custom value types (registerCustomTypeLua / registerCustomTypeAA) --------
+
+function cmd_register_custom_type(params)
+    local name = params.name
+    if type(name) ~= "string" or name == "" then
+        return { success = false, error = "name is required", error_code = "INVALID_PARAMS" }
+    end
+    local byteCount = tonumber(params.byte_count)
+    if not byteCount or byteCount < 1 or byteCount > 8 then
+        return { success = false, error = "byte_count must be 1..8", error_code = "INVALID_PARAMS" }
+    end
+    if type(params.bytes_to_value_lua) ~= "string" or type(params.value_to_bytes_lua) ~= "string" then
+        return { success = false, error = "bytes_to_value_lua and value_to_bytes_lua are required",
+                 error_code = "INVALID_PARAMS" }
+    end
+    local mk = gapApi("registerCustomTypeLua")
+    if not mk then return { success = false, error = "registerCustomTypeLua unavailable", error_code = "CE_API_UNAVAILABLE" } end
+
+    local fB2V, e1 = load(params.bytes_to_value_lua, "b2v", "t")
+    local fV2B, e2 = load(params.value_to_bytes_lua, "v2b", "t")
+    if not fB2V then return { success = false, error = "bytes_to_value_lua compile error: " .. tostring(e1), error_code = "INVALID_PARAMS" } end
+    if not fV2B then return { success = false, error = "value_to_bytes_lua compile error: " .. tostring(e2), error_code = "INVALID_PARAMS" } end
+
+    local okR, ct = pcall(mk, name, byteCount, fB2V, fV2B, params.is_float == true)
+    if not okR or not ct then
+        return { success = false, error = "registerCustomTypeLua failed: " .. tostring(ct), error_code = "CE_API_ERROR" }
+    end
+    gapCustomTypes[name] = byteCount
+    return { success = true, name = name, byte_count = byteCount, is_float = params.is_float == true }
+end
+
+function cmd_register_custom_type_aa(params)
+    local name = params.name
+    local script = params.script
+    if type(name) ~= "string" or type(script) ~= "string" or script == "" then
+        return { success = false, error = "name and script are required", error_code = "INVALID_PARAMS" }
+    end
+    local mk = gapApi("registerCustomTypeAutoAssembler")
+    if not mk then return { success = false, error = "registerCustomTypeAutoAssembler unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local okR, ct = pcall(mk, script)
+    if not okR or not ct then
+        return { success = false, error = "registerCustomTypeAutoAssembler failed: " .. tostring(ct), error_code = "CE_API_ERROR" }
+    end
+    return { success = true, name = name, note = "byte_count unknown for AA types; pass byte_count to read_custom/write_custom" }
+end
+
+function cmd_get_custom_type(params)
+    local name = params.name
+    if type(name) ~= "string" or name == "" then
+        return { success = false, error = "name is required", error_code = "INVALID_PARAMS" }
+    end
+    local get = gapApi("getCustomType")
+    if not get then return { success = false, error = "getCustomType unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local okG, ct = pcall(get, name)
+    if not okG or not ct then
+        return { success = false, error = "custom type not found", error_code = "NOT_FOUND" }
+    end
+    return { success = true, name = name, registered_byte_count = gapCustomTypes[name],
+             uses_float = (pcall(function() return ct.scriptUsesFloat end) and ct.scriptUsesFloat) or false }
+end
+
+local function gapCustomByteCount(params, name)
+    if tonumber(params.byte_count) then return tonumber(params.byte_count) end
+    return gapCustomTypes[name]
+end
+
+function cmd_read_custom(params)
+    local name = params.type_name
+    if type(name) ~= "string" or name == "" then
+        return { success = false, error = "type_name is required", error_code = "INVALID_PARAMS" }
+    end
+    local addr, err = gapAddr(params)
+    if not addr then return err end
+    local get = gapApi("getCustomType")
+    if not get then return { success = false, error = "getCustomType unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local okG, ct = pcall(get, name)
+    if not okG or not ct then
+        return { success = false, error = "custom type not found", error_code = "NOT_FOUND" }
+    end
+    local n = gapCustomByteCount(params, name)
+    if not n then
+        return { success = false, error = "byte_count required (not tracked for this type)", error_code = "INVALID_PARAMS" }
+    end
+    local rb = gapApi("readBytes")
+    if not rb then return { success = false, error = "readBytes unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local okR, bytes = pcall(rb, addr, n, true)
+    if not okR or type(bytes) ~= "table" then
+        return { success = false, error = "read failed: " .. tostring(bytes), error_code = "CE_API_ERROR" }
+    end
+    local okV, value = pcall(function() return ct:byteTableToValue(bytes, addr) end)
+    if not okV then
+        return { success = false, error = "byteTableToValue failed: " .. tostring(value), error_code = "CE_API_ERROR" }
+    end
+    return { success = true, address = toHex(addr), type_name = name, value = value }
+end
+
+function cmd_write_custom(params)
+    local name = params.type_name
+    if type(name) ~= "string" or name == "" or params.value == nil then
+        return { success = false, error = "type_name and value are required", error_code = "INVALID_PARAMS" }
+    end
+    local addr, err = gapAddr(params)
+    if not addr then return err end
+    local get = gapApi("getCustomType")
+    if not get then return { success = false, error = "getCustomType unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local okG, ct = pcall(get, name)
+    if not okG or not ct then
+        return { success = false, error = "custom type not found", error_code = "NOT_FOUND" }
+    end
+    local okB, bytes = pcall(function() return ct:valueToByteTable(params.value, addr) end)
+    if not okB or type(bytes) ~= "table" then
+        return { success = false, error = "valueToByteTable failed: " .. tostring(bytes), error_code = "CE_API_ERROR" }
+    end
+    local wb = gapApi("writeBytes")
+    if not wb then return { success = false, error = "writeBytes unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local okW, werr = pcall(wb, addr, bytes)
+    if not okW then
+        return { success = false, error = "write failed: " .. tostring(werr), error_code = "CE_API_ERROR" }
+    end
+    return { success = true, address = toHex(addr), type_name = name, wrote = #bytes }
+end
+
+-- ---- Code dissection database (getDissectCode) ---------------------------------
+
+local function gapDissect()
+    local get = gapApi("getDissectCode")
+    if not get then return nil, { success = false, error = "getDissectCode unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local okD, dc = pcall(get)
+    if not okD or not dc then
+        return nil, { success = false, error = "getDissectCode failed: " .. tostring(dc), error_code = "CE_API_ERROR" }
+    end
+    return dc
+end
+
+function cmd_dissect_code_start(params)
+    local dc, err = gapDissect()
+    if not dc then return err end
+    local okR, res
+    if type(params.module) == "string" and params.module ~= "" then
+        okR, res = pcall(function() return dc.dissect(dc, params.module) end)
+    elseif params.base ~= nil then
+        local base, aerr = gapAddr(params, "base")
+        if not base then return aerr end
+        local size = tonumber(params.size) or 0
+        okR, res = pcall(function() return dc.dissect(dc, base, size) end)
+    else
+        return { success = false, error = "provide 'module' or 'base'+'size'", error_code = "INVALID_PARAMS" }
+    end
+    if not okR then
+        return { success = false, error = "dissect failed: " .. tostring(res), error_code = "CE_API_ERROR" }
+    end
+    return { success = true, scope = params.module or (toHex(params.base) .. "+" .. tostring(params.size)) }
+end
+
+function cmd_dissect_code_references(params)
+    local dc, err = gapDissect()
+    if not dc then return err end
+    local addr, aerr = gapAddr(params)
+    if not addr then return aerr end
+    local okR, refs = pcall(function() return dc.getReferences(dc, addr) end)
+    if not okR then
+        return { success = false, error = "getReferences failed: " .. tostring(refs), error_code = "CE_API_ERROR" }
+    end
+    local items = {}
+    if type(refs) == "table" then
+        for from, typ in pairs(refs) do
+            items[#items + 1] = { from = (type(from) == "number") and toHex(from) or from,
+                                  type = (type(typ) == "number") and tostring(typ) or typ }
+        end
+    end
+    local limit, offset, page, total = paginate(params, items, 50)
+    local out = {}
+    for i = offset + 1, math.min(offset + limit, #items) do out[#out + 1] = items[i] end
+    return { success = true, address = toHex(addr), total = total, offset = offset,
+             limit = limit, returned = #out, references = out }
+end
+
+function cmd_dissect_code_strings(params)
+    local dc, err = gapDissect()
+    if not dc then return err end
+    local okR, strs = pcall(function() return dc.getReferencedStrings(dc) end)
+    if not okR then
+        return { success = false, error = "getReferencedStrings failed: " .. tostring(strs), error_code = "CE_API_ERROR" }
+    end
+    local items = {}
+    if type(strs) == "table" then
+        for addr, s in pairs(strs) do
+            items[#items + 1] = { address = (type(addr) == "number") and toHex(addr) or addr, string = tostring(s) }
+        end
+    end
+    local limit, offset, _, total = paginate(params, items, 100)
+    local out = {}
+    for i = offset + 1, math.min(offset + limit, #items) do out[#out + 1] = items[i] end
+    return { success = true, total = #items, offset = offset, limit = limit,
+             returned = #out, strings = out }
+end
+
+function cmd_dissect_code_functions(params)
+    local dc, err = gapDissect()
+    if not dc then return err end
+    local okR, fns = pcall(function() return dc.getReferencedFunctions(dc) end)
+    if not okR then
+        return { success = false, error = "getReferencedFunctions failed: " .. tostring(fns), error_code = "CE_API_ERROR" }
+    end
+    local items = {}
+    if type(fns) == "table" then
+        for addr in pairs(fns) do
+            items[#items + 1] = { address = (type(addr) == "number") and toHex(addr) or addr }
+        end
+    end
+    local limit, offset, _, total = paginate(params, items, 100)
+    local out = {}
+    for i = offset + 1, math.min(offset + limit, #items) do out[#out + 1] = items[i] end
+    return { success = true, total = #items, offset = offset, limit = limit,
+             returned = #out, functions = out }
+end
+
+function cmd_dissect_code_manage(params)
+    local dc, err = gapDissect()
+    if not dc then return err end
+    local action = params.action
+    if action == "save" then
+        if type(params.filename) ~= "string" or params.filename == "" then
+            return { success = false, error = "filename is required for save", error_code = "INVALID_PARAMS" }
+        end
+        local okS, serr = pcall(function() return dc.saveToFile(dc, params.filename) end)
+        if not okS then return { success = false, error = "saveToFile failed: " .. tostring(serr), error_code = "CE_API_ERROR" } end
+        return { success = true, action = "save", filename = params.filename }
+    elseif action == "load" then
+        if type(params.filename) ~= "string" or params.filename == "" then
+            return { success = false, error = "filename is required for load", error_code = "INVALID_PARAMS" }
+        end
+        local okL, lerr = pcall(function() return dc.loadFromFile(dc, params.filename) end)
+        if not okL then return { success = false, error = "loadFromFile failed: " .. tostring(lerr), error_code = "CE_API_ERROR" } end
+        return { success = true, action = "load", filename = params.filename }
+    elseif action == "clear" then
+        pcall(function() return dc.clear(dc) end)
+        return { success = true, action = "clear" }
+    end
+    return { success = false, error = "action must be save|load|clear", error_code = "INVALID_PARAMS" }
+end
+
+-- ---- .NET runtime inspection (DotNetDataCollector) ------------------------------
+
+local function gapDotnet()
+    local get = gapApi("getDotNetDataCollector")
+    if not get then
+        return nil, { success = false, error = "getDotNetDataCollector unavailable", error_code = "CE_API_UNAVAILABLE" }
+    end
+    local okD, dc = pcall(get)
+    if not okD or not dc then
+        return nil, { success = false, error = "getDotNetDataCollector failed: " .. tostring(dc), error_code = "CE_API_ERROR" }
+    end
+    return dc
+end
+
+function cmd_dotnet_status()
+    local dc, err = gapDotnet()
+    if not dc then return err end
+    local attached = false
+    pcall(function() attached = dc.Attached == true end)
+    return { success = true, attached = attached }
+end
+
+local function gapDotnetCall(method, ...)
+    local dc, err = gapDotnet()
+    if not dc then return err end
+    local args = table.pack(...)
+    local okR, res = pcall(function()
+        return dc[method](dc, table.unpack(args, 1, args.n))
+    end)
+    if not okR then
+        return { success = false, error = method .. " failed: " .. tostring(res), error_code = "CE_API_ERROR" }
+    end
+    return res
+end
+
+function cmd_dotnet_enum_domains()
+    local res = gapDotnetCall("enumDomains")
+    if type(res) == "table" and res.success == false then return res end
+    return { success = true, domains = res or {} }
+end
+
+function cmd_dotnet_enum_modules(params)
+    local dh = tonumber(params.domain_handle)
+    if not dh then return { success = false, error = "domain_handle is required", error_code = "INVALID_PARAMS" } end
+    local res = gapDotnetCall("enumModuleList", dh)
+    if type(res) == "table" and res.success == false then return res end
+    return { success = true, modules = res or {} }
+end
+
+function cmd_dotnet_enum_types(params)
+    local mh = tonumber(params.module_handle)
+    if not mh then return { success = false, error = "module_handle is required", error_code = "INVALID_PARAMS" } end
+    local res = gapDotnetCall("enumTypeDefs", mh)
+    if type(res) == "table" and res.success == false then return res end
+    return { success = true, typedefs = res or {} }
+end
+
+function cmd_dotnet_type_details(params)
+    local dh = tonumber(params.domain_handle)
+    local tk = tonumber(params.typedef_token)
+    if not dh or not tk then
+        return { success = false, error = "domain_handle and typedef_token are required", error_code = "INVALID_PARAMS" }
+    end
+    local data = gapDotnetCall("getTypeDefData", dh, tk)
+    if type(data) == "table" and data.success == false then return data end
+    local methods = gapDotnetCall("getTypeDefMethods", dh, tk)
+    if type(methods) == "table" and methods.success == false then methods = nil end
+    local parent = gapDotnetCall("getTypeDefParent", dh, tk)
+    if type(parent) == "table" and parent.success == false then parent = nil end
+    return { success = true, fields = data or {}, methods = methods or {}, parent = parent }
+end
+
+function cmd_dotnet_method_params(params)
+    local dh = tonumber(params.domain_handle)
+    local mt = tonumber(params.method_token)
+    if not dh or not mt then
+        return { success = false, error = "domain_handle and method_token are required", error_code = "INVALID_PARAMS" }
+    end
+    local res = gapDotnetCall("getMethodParameters", dh, mt)
+    if type(res) == "table" and res.success == false then return res end
+    return { success = true, parameters = res or {} }
+end
+
+function cmd_dotnet_address_info(params)
+    local addr, err = gapAddr(params)
+    if not addr then return err end
+    local res = gapDotnetCall("getAddressData", addr)
+    if type(res) == "table" and res.success == false then return res end
+    return { success = true, address = toHex(addr), data = res }
+end
+
+function cmd_dotnet_enum_objects(params)
+    local res
+    if params.type_name ~= nil then
+        res = gapDotnetCall("enumAllObjectsOfType", params.type_name)
+    else
+        res = gapDotnetCall("enumAllObjects")
+    end
+    if type(res) == "table" and res.success == false then return res end
+    return { success = true, objects = res or {} }
+end
+
+-- ---- Embedded table files (TableFile) --------------------------------------------
+
+function cmd_table_file_create(params)
+    local name = params.name
+    if type(name) ~= "string" or name == "" then
+        return { success = false, error = "name is required", error_code = "INVALID_PARAMS" }
+    end
+    local mk = gapApi("createTableFile")
+    if not mk then return { success = false, error = "createTableFile unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local okC, tf = pcall(mk, name, params.source_path)
+    if not okC or not tf then
+        return { success = false, error = "createTableFile failed: " .. tostring(tf), error_code = "CE_API_ERROR" }
+    end
+    return { success = true, name = name, from = params.source_path }
+end
+
+function cmd_table_file_find(params)
+    local name = params.name
+    if type(name) ~= "string" or name == "" then
+        return { success = false, error = "name is required", error_code = "INVALID_PARAMS" } end
+    local find = gapApi("findTableFile")
+    if not find then return { success = false, error = "findTableFile unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local okF, tf = pcall(find, name)
+    if not okF or not tf then
+        return { success = false, error = "table file not found", error_code = "NOT_FOUND" }
+    end
+    return { success = true, name = name }
+end
+
+function cmd_table_file_export(params)
+    local name, dest = params.name, params.dest_path
+    if type(name) ~= "string" or type(dest) ~= "string" or dest == "" then
+        return { success = false, error = "name and dest_path are required", error_code = "INVALID_PARAMS" }
+    end
+    local find = gapApi("findTableFile")
+    if not find then return { success = false, error = "findTableFile unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local okF, tf = pcall(find, name)
+    if not okF or not tf then
+        return { success = false, error = "table file not found", error_code = "NOT_FOUND" }
+    end
+    local okS, serr = pcall(function() return tf.saveToFile(tf, dest) end)
+    if not okS then
+        return { success = false, error = "saveToFile failed: " .. tostring(serr), error_code = "CE_API_ERROR" }
+    end
+    return { success = true, name = name, dest = dest }
+end
+
+function cmd_table_file_delete(params)
+    local name = params.name
+    if type(name) ~= "string" or name == "" then
+        return { success = false, error = "name is required", error_code = "INVALID_PARAMS" }
+    end
+    local find = gapApi("findTableFile")
+    if not find then return { success = false, error = "findTableFile unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local okF, tf = pcall(find, name)
+    if not okF or not tf then
+        return { success = false, error = "table file not found", error_code = "NOT_FOUND" }
+    end
+    local okD, derr = pcall(function() return tf.delete(tf) end)
+    if not okD then
+        return { success = false, error = "delete failed: " .. tostring(derr), error_code = "CE_API_ERROR" }
+    end
+    return { success = true, name = name }
+end
+
+-- ---- Auto Assembler command extensions --------------------------------------------
+
+function cmd_register_aa_command(params)
+    local command = params.command
+    if type(command) ~= "string" or command == "" then
+        return { success = false, error = "command is required", error_code = "INVALID_PARAMS" }
+    end
+    if type(params.lua_code) ~= "string" or params.lua_code == "" then
+        return { success = false, error = "lua_code is required", error_code = "INVALID_PARAMS" }
+    end
+    local reg = gapApi("registerAutoAssemblerCommand")
+    if not reg then return { success = false, error = "registerAutoAssemblerCommand unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local chunk, cerr = load(params.lua_code, "aa_cmd", "t")
+    if not chunk then
+        return { success = false, error = "lua_code compile error: " .. tostring(cerr), error_code = "INVALID_PARAMS" }
+    end
+    local okR, rerr = pcall(reg, command, chunk)
+    if not okR then
+        return { success = false, error = "registerAutoAssemblerCommand failed: " .. tostring(rerr), error_code = "CE_API_ERROR" }
+    end
+    return { success = true, command = command }
+end
+
+function cmd_unregister_aa_command(params)
+    local command = params.command
+    if type(command) ~= "string" or command == "" then
+        return { success = false, error = "command is required", error_code = "INVALID_PARAMS" }
+    end
+    local res = gapCall("unregisterAutoAssemblerCommand", command)
+    if type(res) == "table" then return res end
+    return { success = true, command = command }
+end
+
+-- ---- HTTP (Internet class) ----------------------------------------------------------
+
+function cmd_http_get(params)
+    local url = params.url
+    if type(url) ~= "string" or url == "" then
+        return { success = false, error = "url is required", error_code = "INVALID_PARAMS" }
+    end
+    local gi = gapApi("getInternet")
+    if not gi then return { success = false, error = "getInternet unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local okI, net = pcall(gi, "cheatengine-mcp")
+    if not okI or not net then
+        return { success = false, error = "getInternet failed: " .. tostring(net), error_code = "CE_API_ERROR" }
+    end
+    if type(params.header) == "string" then
+        pcall(function() net.Header = params.header end)
+    end
+    local okG, body = pcall(function() return net.getURL(net, url) end)
+    if not okG then
+        return { success = false, error = "getURL failed: " .. tostring(body), error_code = "CE_API_ERROR" }
+    end
+    if body == nil then
+        return { success = false, error = "request failed (nil body)", error_code = "CE_API_ERROR" }
+    end
+    body = tostring(body)
+    local maxLen = tonumber(params.max_len) or 65536
+    local truncated = #body > maxLen
+    return { success = true, url = url, length = #body, truncated = truncated,
+             body = body:sub(1, maxLen) }
+end
+
+function cmd_http_post(params)
+    local url, data = params.url, params.data
+    if type(url) ~= "string" or type(data) ~= "string" then
+        return { success = false, error = "url and data are required", error_code = "INVALID_PARAMS" }
+    end
+    local gi = gapApi("getInternet")
+    if not gi then return { success = false, error = "getInternet unavailable", error_code = "CE_API_UNAVAILABLE" } end
+    local okI, net = pcall(gi, "cheatengine-mcp")
+    if not okI or not net then
+        return { success = false, error = "getInternet failed: " .. tostring(net), error_code = "CE_API_ERROR" }
+    end
+    local okP, res = pcall(function() return net.postURL(net, url, data) end)
+    if not okP then
+        return { success = false, error = "postURL failed: " .. tostring(res), error_code = "CE_API_ERROR" }
+    end
+    return { success = true, url = url, response = res and tostring(res) or nil }
+end
+
+-- ---- DBK kernel interface (safe subset) ----------------------------------------------
+
+function cmd_dbk_initialize()
+    local res = gapCall("dbk_initialize")
+    if type(res) == "table" then return res end
+    return { success = res == true, loaded = res == true,
+             note = res ~= true and "driver not loaded (check test-signing / service)" or nil }
+end
+
+function cmd_dbk_use_kernelmode(params)
+    local mode = params.mode
+    local map = {
+        openprocess   = "dbk_useKernelmodeOpenProcess",
+        memoryaccess  = "dbk_useKernelmodeProcessMemoryAccess",
+        queryregions  = "dbk_useKernelmodeQueryMemoryRegions",
+    }
+    local fname = type(mode) == "string" and map[mode] or nil
+    if not fname then
+        return { success = false, error = "mode must be openprocess|memoryaccess|queryregions", error_code = "INVALID_PARAMS" }
+    end
+    local res = gapCall(fname)
+    if type(res) == "table" then return res end
+    return { success = true, mode = mode }
+end
+
+function cmd_dbk_read_msr(params)
+    local msr = tonumber(params.msr)
+    if not msr then return { success = false, error = "msr index is required", error_code = "INVALID_PARAMS" } end
+    local res = gapCall("dbk_readMSR", msr)
+    if type(res) == "table" then return res end
+    return { success = true, msr = msr, value = res }
+end
+
+function cmd_dbk_write_msr(params)
+    local msr = tonumber(params.msr)
+    local value = params.value
+    if not msr or value == nil then
+        return { success = false, error = "msr and value are required", error_code = "INVALID_PARAMS" }
+    end
+    local res = gapCall("dbk_writeMSR", msr, value)
+    if type(res) == "table" then return res end
+    return { success = true, msr = msr }
+end
+
+-- ---- DBVM hypervisor interface (safe subset) -------------------------------------------
+-- traceonbp_* and bp_* families are intentionally NOT wrapped: they require
+-- blocking event waits that are incompatible with the 1ms single-thread poll
+-- loop. dbvm_watch (already exposed) covers the polling pattern.
+
+function cmd_dbvm_initialize(params)
+    local res = gapCall("dbvm_initialize", params.offloados == true, params.reason)
+    if type(res) == "table" then return res end
+    return { success = true }
+end
+
+function cmd_dbvm_read_msr(params)
+    local msr = tonumber(params.msr)
+    if not msr then return { success = false, error = "msr index is required", error_code = "INVALID_PARAMS" } end
+    local res = gapCall("dbvm_readMSR", msr)
+    if type(res) == "table" then return res end
+    return { success = true, msr = msr, value = res }
+end
+
+function cmd_dbvm_write_msr(params)
+    local msr = tonumber(params.msr)
+    local value = params.value
+    if not msr or value == nil then
+        return { success = false, error = "msr and value are required", error_code = "INVALID_PARAMS" }
+    end
+    local res = gapCall("dbvm_writeMSR", msr, value)
+    if type(res) == "table" then return res end
+    return { success = true, msr = msr }
+end
+
+function cmd_dbvm_cloak_activate(params)
+    local phys = tonumber(params.physical_base)
+    if not phys then return { success = false, error = "physical_base is required", error_code = "INVALID_PARAMS" } end
+    local res
+    if params.virtual_base ~= nil then
+        res = gapCall("dbvm_cloak_activate", phys, tonumber(params.virtual_base))
+    else
+        res = gapCall("dbvm_cloak_activate", phys)
+    end
+    if type(res) == "table" then return res end
+    return { success = true, physical_base = toHex(phys) }
+end
+
+function cmd_dbvm_cloak_deactivate(params)
+    local phys = tonumber(params.physical_base)
+    if not phys then return { success = false, error = "physical_base is required", error_code = "INVALID_PARAMS" } end
+    local res = gapCall("dbvm_cloak_deactivate", phys)
+    if type(res) == "table" then return res end
+    return { success = true, physical_base = toHex(phys) }
+end
+
+function cmd_dbvm_cloak_read(params)
+    local phys = tonumber(params.physical_base)
+    if not phys then return { success = false, error = "physical_base is required", error_code = "INVALID_PARAMS" } end
+    local res = gapCall("dbvm_cloak_readOriginal", phys)
+    if type(res) == "table" and res.success == false then return res end
+    if type(res) ~= "table" or #res == 0 then
+        -- CE returns a 4096-entry bytetable; nil/false/empty = failure
+        return { success = false, error = "cloak read failed", error_code = "CE_API_ERROR" }
+    end
+    local n, preview = #res, {}
+    for i = 1, math.min(n, 64) do preview[i] = res[i] end
+    return { success = true, physical_base = toHex(phys), size = n,
+             preview_first = math.min(n, 64), preview = preview }
+end
+
+function cmd_dbvm_cloak_write(params)
+    local phys = tonumber(params.physical_base)
+    local bytes = params.bytes
+    if not phys then return { success = false, error = "physical_base is required", error_code = "INVALID_PARAMS" } end
+    if type(bytes) ~= "table" or #bytes == 0 or #bytes > 4096 then
+        return { success = false, error = "bytes must be an array of 1..4096 byte values", error_code = "INVALID_PARAMS" }
+    end
+    local res = gapCall("dbvm_cloak_writeOriginal", phys, bytes)
+    if type(res) == "table" then return res end
+    return { success = true, physical_base = toHex(phys), wrote = #bytes }
+end
+
+-- UNIT-31 registrations (dotted, after the UNIT-25 alias block)
+commandHandlers.set_speed                    = cmd_set_speed
+commandHandlers.get_speed                    = cmd_get_speed
+commandHandlers.get_previous_opcode          = cmd_get_previous_opcode
+commandHandlers.get_last_disassemble_data    = cmd_get_last_disassemble_data
+commandHandlers.auto_guess_structure         = cmd_auto_guess_structure
+commandHandlers.create_hotkey                = cmd_create_hotkey
+commandHandlers.list_hotkeys                 = cmd_list_hotkeys
+commandHandlers.remove_hotkey                = cmd_remove_hotkey
+commandHandlers.register_custom_type         = cmd_register_custom_type
+commandHandlers.register_custom_type_aa      = cmd_register_custom_type_aa
+commandHandlers.get_custom_type              = cmd_get_custom_type
+commandHandlers.read_custom                  = cmd_read_custom
+commandHandlers.write_custom                 = cmd_write_custom
+commandHandlers.dissect_code_start           = cmd_dissect_code_start
+commandHandlers.dissect_code_references      = cmd_dissect_code_references
+commandHandlers.dissect_code_strings         = cmd_dissect_code_strings
+commandHandlers.dissect_code_functions       = cmd_dissect_code_functions
+commandHandlers.dissect_code_manage          = cmd_dissect_code_manage
+commandHandlers.dotnet_status                = cmd_dotnet_status
+commandHandlers.dotnet_enum_domains          = cmd_dotnet_enum_domains
+commandHandlers.dotnet_enum_modules          = cmd_dotnet_enum_modules
+commandHandlers.dotnet_enum_types            = cmd_dotnet_enum_types
+commandHandlers.dotnet_type_details          = cmd_dotnet_type_details
+commandHandlers.dotnet_method_params         = cmd_dotnet_method_params
+commandHandlers.dotnet_address_info          = cmd_dotnet_address_info
+commandHandlers.dotnet_enum_objects          = cmd_dotnet_enum_objects
+commandHandlers.table_file_create            = cmd_table_file_create
+commandHandlers.table_file_find              = cmd_table_file_find
+commandHandlers.table_file_export            = cmd_table_file_export
+commandHandlers.table_file_delete            = cmd_table_file_delete
+commandHandlers.register_aa_command          = cmd_register_aa_command
+commandHandlers.unregister_aa_command        = cmd_unregister_aa_command
+commandHandlers.http_get                     = cmd_http_get
+commandHandlers.http_post                    = cmd_http_post
+commandHandlers.dbk_initialize               = cmd_dbk_initialize
+commandHandlers.dbk_use_kernelmode           = cmd_dbk_use_kernelmode
+commandHandlers.dbk_read_msr                 = cmd_dbk_read_msr
+commandHandlers.dbk_write_msr                = cmd_dbk_write_msr
+commandHandlers.dbvm_initialize              = cmd_dbvm_initialize
+commandHandlers.dbvm_read_msr                = cmd_dbvm_read_msr
+commandHandlers.dbvm_write_msr               = cmd_dbvm_write_msr
+commandHandlers.dbvm_cloak_activate          = cmd_dbvm_cloak_activate
+commandHandlers.dbvm_cloak_deactivate        = cmd_dbvm_cloak_deactivate
+commandHandlers.dbvm_cloak_read              = cmd_dbvm_cloak_read
+commandHandlers.dbvm_cloak_write             = cmd_dbvm_cloak_write
+
+-- >>> END UNIT-31 <<<
 
 commandHandlers.batch        = cmd_batch
 commandHandlers.status       = cmd_status
