@@ -2,7 +2,7 @@
 
 # Cheat Engine MCP Bridge — 原生 TCP 版
 
-[![Version](https://img.shields.io/badge/version-15.4.1-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-原生%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/工具-198-brightgreen.svg)](#可用工具)
+[![Version](https://img.shields.io/badge/version-15.4.2-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-原生%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/工具-198-brightgreen.svg)](#可用工具)
 
 让你的 AI 助手（Claude、Cursor、Codex、任何 MCP 客户端）直接驱动 **Cheat Engine**：
 读写进程内存、扫描数值、反汇编函数、下断点、注入代码、操作 CT 表——**198 个 MCP 工具**，
@@ -74,12 +74,14 @@ python -c "from mcp.server.fastmcp import FastMCP; print('OK')"
 
 ### 3. 放置 DLL
 
-把与你 CE 位数匹配的 DLL 复制到 **CE 目录**：
+把与你 CE 位数匹配的 DLL 复制到 CE 的**插件目录**（推荐——CE 原生组件的标准位置）：
 
 ```
-C:\CE 7.5\cheatengine-x86_64.exe
-C:\CE 7.5\ce_mcp_tcp_x64.dll    ← 放这里（32 位 CE 用 _x86.dll）
+C:\Program Files\Cheat Engine\cheatengine-x86_64.exe
+C:\Program Files\Cheat Engine\plugins\ce_mcp_tcp_x64.dll    ← 放这里（32 位 CE 用 _x86.dll）
 ```
+
+放在 CE 根目录（`C:\Program Files\Cheat Engine\ce_mcp_tcp_x64.dll`）也可以——桥会同时搜索两处，保留根目录只为向后兼容。
 
 预构建 DLL 位于 `MCP_Server/`（也在 `NativeBridge/bin/`）。
 
@@ -96,13 +98,25 @@ dofile([[C:\path\to\MCP_Server\ce_mcp_bridge.lua]])
 预期输出：
 ```
 [MCP] CE x64 - loading ce_mcp_tcp_x64.dll
-[MCP] DLL loaded OK from: C:\CE 7.5\ce_mcp_tcp_x64.dll
-[MCP] Bridge v15.4.1 started on 127.0.0.1:17171 (native TCP, 1ms poll)
+[MCP] DLL loaded OK from: C:\Program Files\Cheat Engine\plugins\ce_mcp_tcp_x64.dll
+[MCP] Bridge v15.4.2 started on 127.0.0.1:17171 (native TCP, 1ms poll)
 ```
 
 不会弹出任何窗口——DLL 调试控制台默认隐藏（`CE_MCP_DEBUG_CONSOLE=1` 可显示，且不抢焦点）。
 
 ### 5. 配置 AI 客户端
+
+服务端是基于官方 MCP Python SDK 的标准 **MCP stdio** 服务器，遵循 MCP 最新规范，**任何**支持 stdio MCP 的客户端都能接入。通用配置都是同一个 `mcpServers` JSON 结构（唯独 Codex CLI 用 TOML）：Cursor、Windsurf、Cline、Claude Desktop、Claude Code、Gemini CLI、Trae、Qoder、CodeBuddy 等国内外 IDE / 终端 AI CLI 均适用。
+
+<details>
+<summary><b>Claude Code CLI（推荐方式）</b></summary>
+
+```bash
+claude mcp add cheatengine -- python "C:/path/to/MCP_Server/mcp_cheatengine.py"
+```
+
+或项目级 `.mcp.json`（与下方相同的 `mcpServers` JSON 结构）。
+</details>
 
 <details>
 <summary><b>Cursor IDE</b></summary>
@@ -150,6 +164,40 @@ args = ['C:\path\to\MCP_Server\mcp_cheatengine.py']
 </details>
 
 <details>
+<summary><b>Gemini CLI</b></summary>
+
+`~/.gemini/settings.json`：
+```json
+{
+  "mcpServers": {
+    "cheatengine": {
+      "command": "python",
+      "args": ["C:/path/to/MCP_Server/mcp_cheatengine.py"],
+      "env": { "CE_HOST": "127.0.0.1", "CE_PORT": "17171" }
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Trae / Qoder / CodeBuddy（国产 IDE）</b></summary>
+
+均使用相同的 `mcpServers` JSON 格式：
+
+- **Trae**：`~/.trae/mcp.json`（或在 MCP 面板 → 手动添加 → stdio 类型）
+- **Qoder**：MCP 面板 → stdio 服务器，command 填 `python`，args 同上
+- **CodeBuddy**：`~/.codebuddy/mcp.json`（与 Cursor 同结构）
+</details>
+
+<details>
+<summary><b>Windsurf / Cline / 其他 JSON 客户端</b></summary>
+
+与 Cursor 相同的 `mcpServers` JSON——只是配置文件位置不同
+（Windsurf 为 `~/.codeium/windsurf/mcp_config.json`，VS Code 为 `settings.json` / Cline 面板等）。
+</details>
+
+<details>
 <summary><b>远程 CE（另一台机器）</b></summary>
 
 ```json
@@ -169,7 +217,7 @@ DLL 默认只绑定 `127.0.0.1`。远程访问需在 CE 机器启动前设置环
 问 AI：*"Ping 一下 Cheat Engine"*
 
 ```json
-{"success": true, "version": "15.4.1", "message": "CE MCP Bridge v15.4.1 alive"}
+{"success": true, "version": "15.4.2", "message": "CE MCP Bridge v15.4.2 alive"}
 ```
 
 ---

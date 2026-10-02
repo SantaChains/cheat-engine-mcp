@@ -234,3 +234,6 @@ NativeBridge/**/*.pdb
 # Ad-hoc verification temp files
 .workbuddy_tmp*
 _verify_*
+
+# Local personal project doc (Elden Ring CT localization) - keep local only
+/usage.md

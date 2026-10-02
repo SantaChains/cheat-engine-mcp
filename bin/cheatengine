@@ -1,0 +1,45 @@
+#!/usr/bin/env node
+/**
+ * Cheat Engine MCP Server - CLI Entry Point
+ * Works with: npm install -g, npx, and local installs
+ */
+
+const path = require('path');
+const fs = require('fs');
+
+// Debug mode
+const DEBUG = false;
+function log(...args) {
+  if (DEBUG) console.error('[cheatengine]', ...args);
+}
+
+log('Starting cheatengine MCP server...');
+
+// Get package root directory (__dirname is bin/ in the package)
+const packageRoot = path.join(__dirname, '..');
+log('Package root:', packageRoot);
+
+const serverScript = path.join(packageRoot, 'ce_mcp_server.js');
+log('Server script:', serverScript);
+
+// Verify script exists
+if (!fs.existsSync(serverScript)) {
+  console.error('[cheatengine] Error: Cannot find ce_mcp_server.js');
+  console.error('Expected at:', serverScript);
+  process.exit(1);
+}
+
+// Ensure stdin/stdout are in proper mode for MCP
+if (process.stdin.isTTY) {
+  process.stdin.setRawMode(false);
+}
+
+// Run the server
+log('Loading MCP server...');
+try {
+  require(serverScript);
+} catch (err) {
+  console.error('[cheatengine] Failed to start:', err.message);
+  console.error(err.stack);
+  process.exit(1);
+}

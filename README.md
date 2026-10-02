@@ -2,7 +2,7 @@
 
 # Cheat Engine MCP Bridge — Native TCP Edition
 
-[![Version](https://img.shields.io/badge/version-15.4.1-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-Native%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/tools-198-brightgreen.svg)](#available-tools)
+[![Version](https://img.shields.io/badge/version-15.4.2-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-Native%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/tools-198-brightgreen.svg)](#available-tools)
 
 Let your AI assistant (Claude, Cursor, Codex, any MCP client) drive **Cheat Engine** directly:
 read and write process memory, scan for values, disassemble functions, set breakpoints,
@@ -75,12 +75,17 @@ If you see `ModuleNotFoundError: No module named 'mcp'`, try `python -m pip inst
 
 ### 3. Place the DLL
 
-Copy the DLL matching your Cheat Engine build into the **CE directory**:
+Copy the DLL matching your Cheat Engine build into CE's **plugin directory** (recommended — the
+standard location for CE native components):
 
 ```
-C:\CE 7.5\cheatengine-x86_64.exe
-C:\CE 7.5\ce_mcp_tcp_x64.dll    ← here (use _x86.dll for 32-bit CE)
+C:\Program Files\Cheat Engine\cheatengine-x86_64.exe
+C:\Program Files\Cheat Engine\plugins\ce_mcp_tcp_x64.dll    ← here (use _x86.dll for 32-bit CE)
 ```
+
+The CE root directory (`C:\Program Files\Cheat Engine\ce_mcp_tcp_x64.dll`) also works if you
+prefer — the bridge searches both, plugins first is *not* required; root is kept for backward
+compatibility.
 
 Prebuilt DLLs ship in `MCP_Server/` (also in `NativeBridge/bin/`).
 
@@ -97,13 +102,29 @@ dofile([[C:\path\to\MCP_Server\ce_mcp_bridge.lua]])
 Expected output:
 ```
 [MCP] CE x64 - loading ce_mcp_tcp_x64.dll
-[MCP] DLL loaded OK from: C:\CE 7.5\ce_mcp_tcp_x64.dll
-[MCP] Bridge v15.4.1 started on 127.0.0.1:17171 (native TCP, 1ms poll)
+[MCP] DLL loaded OK from: C:\Program Files\Cheat Engine\plugins\ce_mcp_tcp_x64.dll
+[MCP] Bridge v15.4.2 started on 127.0.0.1:17171 (native TCP, 1ms poll)
 ```
 
 No window will pop up — the DLL debug console is hidden by default (`CE_MCP_DEBUG_CONSOLE=1` shows it without stealing focus).
 
 ### 5. Configure Your AI Client
+
+The server is a standard **MCP stdio** server built on the official MCP Python SDK — it follows the
+current MCP spec and works with **any** client that supports stdio MCP servers. The generic config
+shape is always the same `mcpServers` JSON object (Codex CLI is the one TOML outlier below):
+Cursor, Windsurf, Cline, Claude Desktop, Claude Code, Gemini CLI, Trae, Qoder, CodeBuddy and other
+IDEs / terminal AI CLIs all accept it.
+
+<details>
+<summary><b>Claude Code CLI (recommended way)</b></summary>
+
+```bash
+claude mcp add cheatengine -- python "C:/path/to/MCP_Server/mcp_cheatengine.py"
+```
+
+Or project-scoped `.mcp.json` (same `mcpServers` JSON shape as below).
+</details>
 
 <details>
 <summary><b>Cursor IDE</b></summary>
@@ -151,6 +172,40 @@ args = ['C:\path\to\MCP_Server\mcp_cheatengine.py']
 </details>
 
 <details>
+<summary><b>Gemini CLI</b></summary>
+
+`~/.gemini/settings.json`:
+```json
+{
+  "mcpServers": {
+    "cheatengine": {
+      "command": "python",
+      "args": ["C:/path/to/MCP_Server/mcp_cheatengine.py"],
+      "env": { "CE_HOST": "127.0.0.1", "CE_PORT": "17171" }
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Trae / Qoder / CodeBuddy (Chinese IDEs)</b></summary>
+
+All use the same `mcpServers` JSON format:
+
+- **Trae**: `~/.trae/mcp.json` (or MCP panel → Add manually → stdio)
+- **Qoder**: MCP panel → stdio server, command `python`, args as above
+- **CodeBuddy**: `~/.codebuddy/mcp.json` (same shape as Cursor)
+</details>
+
+<details>
+<summary><b>Windsurf / Cline / other JSON clients</b></summary>
+
+Same `mcpServers` JSON as Cursor — only the config file location differs
+(`~/.codeium/windsurf/mcp_config.json`, VS Code `settings.json` / Cline panel, etc.).
+</details>
+
+<details>
 <summary><b>Remote CE (another machine)</b></summary>
 
 ```json
@@ -170,7 +225,7 @@ By default the DLL binds to `127.0.0.1` only. For remote access set `CE_MCP_BIND
 Ask the AI: *"Ping Cheat Engine"*
 
 ```json
-{"success": true, "version": "15.4.1", "message": "CE MCP Bridge v15.4.1 alive"}
+{"success": true, "version": "15.4.2", "message": "CE MCP Bridge v15.4.2 alive"}
 ```
 
 ---
@@ -253,7 +308,7 @@ Current status: **163/0** Lua unit assertions, **27/0** Python contract assertio
 | Problem | Solution |
 |---------|----------|
 | `No module named 'mcp'` | Run `python -m pip install mcp` (see [Install](#2-install-python-dependencies)) |
-| DLL not found | Copy `ce_mcp_tcp_x64.dll` to CE directory |
+| DLL not found | Copy `ce_mcp_tcp_x64.dll` into CE's `plugins\` folder (or the CE root directory) |
 | Cannot connect | Check `netstat -an \| findstr 17171`, verify CE_HOST/CE_PORT |
 | `error_code: BRIDGE_UNAVAILABLE` | Bridge DLL not listening, or your Lua script is still the pre-v15 pipe build |
 | `error_code: TIMEOUT` | Raise `CE_MCP_TIMEOUT`; the command is **not** retried by design |

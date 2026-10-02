@@ -1,6 +1,6 @@
 # DEV_GUIDE — cheatengine-mcp-tcp-bridge 开发者指南
 
-> 面向维护者与二次开发者。版本基线：Lua bridge **v15.4.1** / Native DLL **v3.3.4**。
+> 面向维护者与二次开发者。版本基线：Lua bridge **v15.4.2** / Native DLL **v3.3.4**。
 > 所有数字（上限、端口、超时）均为代码中的真实常量，非建议值。
 
 ---
@@ -27,7 +27,7 @@
 └──────────────┬──────────────────────────────────────────────────────┘
                │ 进程内 C 函数调用（非 socket，同属 CE 进程）
 ┌──────────────▼──────────────────────────────────────────────────────┐
-│ ce_mcp_bridge.lua v15.4.1 — 运行在 CE 主线程                          │
+│ ce_mcp_bridge.lua v15.4.2 — 运行在 CE 主线程                          │
 │  · 1ms CreateTimer 轮询 mcp_tcp_poll()，每 tick drain 一条待处理命令     │
 │  · executeCommand() → commandHandlers[method] 直查（无 MCP 握手层）    │
 │  · 194 个 cmd_* handler + 203 个注册方法名（含别名）               │
@@ -315,7 +315,7 @@ MinGW 产物验收：`objdump -p <dll> | grep "DLL Name"` —— 只允许 KERNE
 
 **DLL 与 Lua 的耦合面**只有 5 个 C 函数签名 + 线协议，无 ABI 耦合——改 Lua/Python 不需要重编 DLL。
 
-部署：DLL 放到 `ce_mcp_bridge.lua` 同目录；CE 执行该 Lua 即自动启动（`MCP_BRIDGE_NO_AUTOSTART=true` 可只加载不启动，供控制台调试）。
+部署：DLL 放到 CE 的 `plugins\` 目录（标准插件路径，v15.4.2 起桥会自动搜索 `<CE目录>\plugins\`）或 CE 根目录——两处都会被 `tryLoadNativeDLL` 按序尝试；CE 执行该 Lua 即自动启动（`MCP_BRIDGE_NO_AUTOSTART=true` 可只加载不启动，供控制台调试）。
 
 ---
 
@@ -369,7 +369,7 @@ MinGW 产物验收：`objdump -p <dll> | grep "DLL Name"` —— 只允许 KERNE
 - [ ] Lua 139 / Python 27 / Probe 4 全绿
 - [ ] 若改了 `ce_mcp_tcp.c`：双架构重编 + PE 校验 + 双副本 md5 一致
 - [ ] `VERSION`（Lua）/ badge（README ×2）同步 bump
-- [ ] 部署侧：DLL 覆盖到 CE 目录 → CE 里重载 `ce_mcp_bridge.lua` → 控制台见 `[MCP] Bridge v15.4.1 started on 127.0.0.1:17171`
+- [ ] 部署侧：DLL 覆盖到 CE 目录 → CE 里重载 `ce_mcp_bridge.lua` → 控制台见 `[MCP] Bridge v15.4.2 started on 127.0.0.1:17171`
 - [ ] 烟测：`python ce.py ping` → `bridge_status` 检查 `process_attached` / `native.listening`
 - [ ] 无未跟踪的草稿/备份文件混入版本库
 
@@ -379,3 +379,34 @@ MinGW 产物验收：`objdump -p <dll> | grep "DLL Name"` —— 只允许 KERNE
 - 本构建 AutoHotkey/CE 侧存在不可捕获的致命错误族（参考用户级记忆），Lua 侧同理：凡 pcall 能包的都包；
 - `PAGE_GUARD` 类断点方案全面劣于 DBK 调试寄存器方案（DR0-DR3 四槽是硬件上限）；
 - 开启 CE "Query memory region routines" 时对 DBVM 保护页扫描可触发 BSOD——发布文档必须保留此警告。
+
+## 13. CE API 覆盖缺口与路线图（v15.4.2 审计，依据官方 celua.txt 全集）
+
+核心工作流（内存/扫描/调试/AA/符号/表/记录/结构/文件/系统，14 域）已完整覆盖。
+对照 CE 官方 Lua API 全集审计出的真实缺口（按优先级）：
+
+### P1（用户常用，建议优先落地）
+
+| # | CE API | 价值 | 成本 |
+|---|---|---|---|
+| 1 | `speedhack_setSpeed/getSpeed` | 变速——CE 最常用功能之一，当前零覆盖 | 极低 |
+| 2 | `registerCustomTypeLua/AutoAssembler` + `getCustomType` | 加密值/自定义编码类型读写 | 中（回调序列化需设计） |
+| 3 | `getDissectCode` 代码解剖库 | 现 `find_references` 为 AOB 全扫；DissectCode 有缓存更快更准 | 中 |
+| 4 | `DotNetDataCollector` 11 方法 | .NET 域/类型/方法/对象枚举（现仅 inject_dotnet_dll 一个入口） | 中 |
+| 5 | `createHotkey/setOnHotkey` | CE 热键系统 | 低 |
+| 6 | `autoGuess` + 结构 dissect override | 结构自动猜测 | 低 |
+| 7 | `getPreviousOpcode/getLastDisassembleData` | 反汇编上下文导航 | 低 |
+
+### P2（进阶场景）
+
+- DBK 内核开关族：`dbk_useKernelmode*`×3、`dbk_readMSR/writeMSR`、`dbk_initialize`、`dbk_getPEProcess/PEThread`
+- DBVM 高级族：`dbvm_cloak_*`×4（内存隐藏）、`dbvm_traceonbp_*`×5、`dbvm_bp_*`×5、MSR×2、speedhack
+- `createTableFile/findTableFile`（嵌入资源）+ `signTable`
+- AA 扩展注册点：`registerAutoAssemblerCommand/Prologue/Template`、`registerSymbolLookupCallback`、`registerAssembler`、`setAssemblerMode`
+- `getSettings`（CE 设置读写）、`getURL`（网络）
+
+### 非 gap（明确不做，理由如下）
+
+- **指针扫描首扫**：CE Lua 本身无此 API（GUI 专属），桥无法覆盖；`pointer_rescan` 已是 Lua 侧极限
+- **mono_\* 函数族**：仅 mono 附加后动态存在，`evaluate_lua` 可直接调用
+- **LCL GUI 全家桶 / d3dhook / LuaPipe / sleep 类**：headless 设计刻意不暴露（GUI 构建与阻塞调用走 `evaluate_lua` 逃生舱）

@@ -15,7 +15,7 @@
 -- CE_TRANSPORT=pipe option no longer has a counterpart here.
 -- ============================================================================
 
-local VERSION = "15.4.1"
+local VERSION = "15.4.2"
 
 local TCP_BASE_PORT = 17171
 -- Security default: loopback only. Remote debugging is opt-in via the
@@ -7243,6 +7243,9 @@ local function tryLoadNativeDLL()
     local paths = {
         ceDir .. "\\" .. dllName,
         ceDir .. "/" .. dllName,
+        -- Standard CE plugin directory (Cheat Engine\plugins\)
+        ceDir .. "\\plugins\\" .. dllName,
+        ceDir .. "/plugins/" .. dllName,
         dllName,
     }
 

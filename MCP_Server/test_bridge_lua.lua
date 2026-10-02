@@ -47,7 +47,7 @@ end
 
 -- ---------------------------------------------------------------- dispatcher
 print("== version / dispatcher ==")
-ok("version is 15.4.1", MCP_Bridge.version == "15.4.1", MCP_Bridge.version)
+ok("version is 15.4.2", MCP_Bridge.version == "15.4.2", MCP_Bridge.version)
 ok("batch / status / list_methods registered",
    MCP_Bridge.methods.batch and MCP_Bridge.methods.status and MCP_Bridge.methods.list_methods)
 local methodCount = 0
@@ -191,7 +191,7 @@ ok("string shorthand entry rejected as method-not-found",
 -- ------------------------------------------------------------- introspection
 print("== status / list_methods ==")
 local st = req("status")
-ok("status ok", st and st.result.success == true and st.result.version == "15.4.1")
+ok("status ok", st and st.result.success == true and st.result.version == "15.4.2")
 ok("method_count matches dispatcher", st and st.result.method_count == methodCount,
    st and st.result.method_count)
 ok("process_attached reflects CE state", st and st.result.process_attached == false)
@@ -207,7 +207,7 @@ ok("list_methods sorted", lm and lm.result.methods[1] <= lm.result.methods[2])
 local lmp = req("list_methods", { prefix = "dbk" })
 ok("prefix filter", lmp and lmp.result.total == 4 and lmp.result.methods[1] == "dbk_get_cr0",
    lmp and lmp.result.total)
-ok("status alias bridge_status", req("bridge_status").result.version == "15.4.1")
+ok("status alias bridge_status", req("bridge_status").result.version == "15.4.2")
 ok("list alias list_bridge_methods",
    req("list_bridge_methods", { limit = 1 }).result.total == methodCount)
 

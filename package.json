@@ -1,0 +1,34 @@
+{
+  "name": "cheatengine",
+  "version": "6.0.0",
+  "description": "Cheat Engine MCP Server - AI-assisted reverse engineering bridge",
+  "main": "ce_mcp_server.js",
+  "bin": {
+    "cheatengine": "bin/cheatengine"
+  },
+  "scripts": {
+    "start": "node ce_mcp_server.js",
+    "test": "node ce_mcp_server.js"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "cheat-engine",
+    "reverse-engineering",
+    "memory",
+    "game-hacking",
+    "model-context-protocol"
+  ],
+  "author": "",
+  "license": "MIT",
+  "files": [
+    "bin/",
+    "src/",
+    "ce_mcp_server.js",
+    "README.md",
+    "README_CN.md",
+    "ce_mcp_bridge.lua"
+  ]
+}
