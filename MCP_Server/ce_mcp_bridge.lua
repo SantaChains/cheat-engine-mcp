@@ -15,7 +15,7 @@
 -- CE_TRANSPORT=pipe option no longer has a counterpart here.
 -- ============================================================================
 
-local VERSION = "15.7.0"
+local VERSION = "15.8.0"
 
 local TCP_BASE_PORT = 17171
 -- Security default: loopback only. Remote debugging is opt-in via the
@@ -7854,6 +7854,320 @@ end
 
 -- ---- UNIT-33 end -----------------------------------------------------------
 
+-- ---- UNIT-34: session health tools (borrowed from big-CT self-check chains) -
+-- Curated additions: every command here is strictly read-only, so it is safe
+-- before any write/inject workflow. Deliberately NOT ported: auto-resetting
+-- toggles (already covered by set_memory_record_active + read-back) and
+-- heuristic AOB signature quality scoring (unstable, deferred).
+
+-- One-shot session preflight: process, main module, game version, loaded
+-- table, and optional symbol resolution in a single round trip. Mirrors the
+-- big CT's [ENABLE] self-check chain (process -> module -> version -> table)
+-- as a read-only probe. Works without an attached process: it reports the
+-- failed checks honestly instead of erroring out.
+function cmd_preflight(params)
+    params = params or {}
+    local checks = {}
+
+    -- 1) process
+    local pid = getOpenedProcessID() or 0
+    local arch = "none"
+    if pid > 0 then
+        local okA, is64 = pcall(targetIs64Bit)
+        arch = okA and (is64 and "x64" or "x86") or "unknown"
+    end
+    checks[#checks + 1] = { name = "process", ok = pid > 0,
+        detail = pid > 0 and ("pid " .. pid .. " (" .. arch .. ")") or "no process attached" }
+
+    -- 2) main module
+    local modInfo = nil
+    if pid > 0 then
+        local modules
+        pcall(function()
+            modules = enumModules(pid)
+            if not modules or #modules == 0 then modules = enumModules() end
+        end)
+        if modules then
+            local base = getAddressSafe(process)
+            local pick = nil
+            for _, m in ipairs(modules) do
+                local addr = m.Address or m.address
+                if addr and (base == nil or addr == base) then pick = m break end
+            end
+            if pick then
+                modInfo = {
+                    name = pick.Name or pick.name or "???",
+                    base = toHex(pick.Address or pick.address or 0),
+                    size = pick.Size or pick.size or 0,
+                    is_64bit = pick.Is64Bit or false,
+                    path = pick.PathToFile or pick.path or "",
+                }
+            end
+        end
+    end
+    checks[#checks + 1] = { name = "main_module", ok = modInfo ~= nil,
+        detail = modInfo and (modInfo.name .. " @ " .. modInfo.base) or "main module not found" }
+
+    -- 3) game version (advisory: nil when the exe carries no version resource)
+    local ver = nil
+    if pid > 0 then ver = gameVersionString() end
+    checks[#checks + 1] = { name = "game_version", ok = ver ~= nil,
+        detail = ver or "no version resource on main module" }
+
+    -- 4) loaded table (advisory)
+    local tablePath, recordCount = nil, 0
+    local okP, tpath = pcall(getTableFile)
+    if okP and type(tpath) == "string" and tpath ~= "" then tablePath = tpath end
+    local al = unit18_get_al()
+    if al then
+        local okC, count = pcall(function() return al.Count end)
+        if okC and type(count) == "number" then recordCount = count end
+    end
+    checks[#checks + 1] = { name = "table", ok = tablePath ~= nil,
+        detail = tablePath and (tablePath .. " (" .. recordCount .. " records)")
+                            or "no table loaded" }
+
+    -- 5) optional core-symbol resolution (advisory, up to 32)
+    local symbols = params.symbols
+    local symbolResults = nil
+    if symbols ~= nil then
+        if type(symbols) ~= "table" or #symbols == 0 then
+            return { success = false, error = "symbols must be a non-empty array",
+                     error_code = "INVALID_PARAMS" }
+        end
+        if #symbols > 32 then
+            return { success = false,
+                     error = "too many symbols (" .. #symbols .. "), max 32",
+                     error_code = "INVALID_PARAMS" }
+        end
+        symbolResults = {}
+        local resolvedCount = 0
+        for i, sym in ipairs(symbols) do
+            if type(sym) ~= "string" or sym == "" then
+                return { success = false, error = "symbol " .. i .. " is not a non-empty string",
+                         error_code = "INVALID_PARAMS" }
+            end
+            local addr = getAddressSafe(sym)
+            if addr then resolvedCount = resolvedCount + 1 end
+            symbolResults[#symbolResults + 1] = { symbol = sym, resolved = addr ~= nil,
+                                                  address = addr and toHex(addr) or nil }
+        end
+        checks[#checks + 1] = { name = "symbols", ok = resolvedCount == #symbols,
+            detail = resolvedCount .. "/" .. #symbols .. " resolved" }
+    end
+
+    return {
+        success = true,
+        ok = pid > 0 and modInfo ~= nil,
+        bridge_version = VERSION,
+        process_id = pid,
+        target_arch = arch,
+        main_module = modInfo,
+        game_version = ver,
+        table_path = tablePath,
+        memory_records = recordCount,
+        symbols = symbolResults,
+        checks = checks,
+    }
+end
+
+-- Batch AOB health scan: verify a list of anchor patterns against a module's
+-- address range in one call. This ports the big CT's aobList idea (all anchors
+-- registered in one place, verified together at startup) into the bridge.
+-- Per-pattern status: "hit" (found, address returned), "miss" (no match in
+-- module range), "error" (bad pattern or scan failure).
+function cmd_aob_health_scan(params)
+    params = params or {}
+    local patterns = params.patterns
+    if type(patterns) ~= "table" or #patterns == 0 then
+        return { success = false, error = "patterns must be a non-empty array",
+                 error_code = "INVALID_PARAMS" }
+    end
+    -- Hard cap: each pattern costs one native memscan on the CE main thread.
+    if #patterns > 256 then
+        return { success = false,
+                 error = "too many patterns (" .. #patterns .. "), max 256",
+                 error_code = "INVALID_PARAMS" }
+    end
+
+    local prok, perr = requireProcess()
+    if not prok then return perr end
+
+    -- Scan scope: named module, else the main module.
+    local modBase, modSize, modName
+    local moduleName = params.module
+    if moduleName ~= nil and moduleName ~= "" then
+        if type(moduleName) ~= "string" then
+            return { success = false, error = "module must be a string",
+                     error_code = "INVALID_PARAMS" }
+        end
+        local b = getAddressSafe(moduleName)
+        if not b then
+            return { success = false, error = "cannot resolve module: " .. moduleName,
+                     error_code = "INVALID_ADDRESS" }
+        end
+        modBase, modName = b, moduleName
+        local okS, sz = pcall(getModuleSize, moduleName)
+        modSize = okS and sz or nil
+    else
+        local modules
+        pcall(function()
+            modules = enumModules(getOpenedProcessID())
+            if not modules or #modules == 0 then modules = enumModules() end
+        end)
+        if not modules then
+            return { success = false, error = "module enumeration failed",
+                     error_code = "SCAN_ERROR" }
+        end
+        local base = getAddressSafe(process)
+        for _, m in ipairs(modules) do
+            local addr = m.Address or m.address
+            if addr and (base == nil or addr == base) then
+                modBase = addr
+                modName = m.Name or m.name
+                modSize = m.Size or m.size
+                break
+            end
+        end
+    end
+    if not modBase or not modSize or modSize <= 0 then
+        return { success = false, error = "module size unavailable; pass 'module' explicitly",
+                 error_code = "SCAN_ERROR" }
+    end
+
+    local protection = params.protection or "+X"
+    local results = {}
+    local hits, misses, errors = 0, 0, 0
+
+    for i, p in ipairs(patterns) do
+        if type(p) ~= "string" or p == "" then
+            results[#results + 1] = { index = i, status = "error",
+                                      error = "pattern must be a non-empty string" }
+            errors = errors + 1
+        else
+            local expanded, terr = expandSigTokens(p)
+            if not expanded then
+                results[#results + 1] = { index = i, pattern = p, status = "error",
+                                          error = (terr and terr.error) or "token expansion failed" }
+                errors = errors + 1
+            else
+                local found
+                local scanOk, scanMsg = pcall(function()
+                    local ms = createMemScan()
+                    ms.setOnlyOneResult(true)
+                    ms.firstScan(soExactValue, vtByteArray, nil, expanded, nil,
+                                 modBase, modBase + modSize, protection,
+                                 fsmNotAligned, "1", true, false, false, false)
+                    ms.waitTillDone()
+                    found = ms.getOnlyResult()
+                    ms.destroy()
+                end)
+                if not scanOk then
+                    results[#results + 1] = { index = i, pattern = expanded,
+                                              status = "error", error = tostring(scanMsg) }
+                    errors = errors + 1
+                elseif found then
+                    hits = hits + 1
+                    results[#results + 1] = { index = i, pattern = expanded,
+                                              status = "hit", address = toHex(found) }
+                else
+                    misses = misses + 1
+                    results[#results + 1] = { index = i, pattern = expanded, status = "miss" }
+                end
+            end
+        end
+    end
+
+    return {
+        success = true,
+        module = modName,
+        module_base = toHex(modBase),
+        module_size = modSize,
+        protection = protection,
+        total = #patterns,
+        hits = hits,
+        misses = misses,
+        errors = errors,
+        hit_ratio = math.floor((hits / #patterns) * 100 + 0.5) / 100,
+        results = results,
+    }
+end
+
+-- Byte fingerprint gate: compare the bytes currently at an address against the
+-- expected hex bytes BEFORE any write/inject. A mismatch means the game
+-- version changed or the anchor hit the wrong spot (an AOB can hit a wrong
+-- location with identical instruction bytes elsewhere); refusing to patch
+-- then is the last line of defence against corrupting the target.
+-- Strictly read-only. Wildcards are not accepted: a fingerprint must be exact.
+function cmd_inject_preview(params)
+    params = params or {}
+
+    local addr, err = parseAddress(params.address)
+    if not addr then
+        return { success = false, error = err or "Invalid address", error_code = "INVALID_ADDRESS" }
+    end
+
+    local expected = params.expected
+    if type(expected) ~= "string" or expected == "" then
+        return { success = false, error = "expected hex byte string required",
+                 error_code = "INVALID_PARAMS" }
+    end
+    local hexStr = expected:gsub("%s+", "")
+    if #hexStr == 0 or #hexStr % 2 ~= 0 then
+        return { success = false, error = "expected must be hex bytes with even length",
+                 error_code = "INVALID_PARAMS" }
+    end
+    if not hexStr:match("^%x+$") then
+        return { success = false,
+                 error = "expected contains non-hex characters (wildcards not supported)",
+                 error_code = "INVALID_PARAMS" }
+    end
+    local len = #hexStr // 2
+    if len > 256 then
+        return { success = false,
+                 error = "expected exceeds the 256-byte inject_preview limit",
+                 error_code = "INVALID_PARAMS" }
+    end
+
+    local pid = getOpenedProcessID()
+    if not pid or pid == 0 then
+        return { success = false, error = "No process attached", error_code = "NO_PROCESS" }
+    end
+
+    local okR, actual = pcall(readBytes, addr, len, true)
+    if not okR or type(actual) ~= "table" then
+        return { success = true, readable = false, match = false,
+                 error = "target memory is not readable",
+                 address = toHex(addr), length = len }
+    end
+
+    local expectedHex, actualHex = {}, {}
+    local match, firstDiff = true, -1
+    for i = 1, len do
+        local e = tonumber(hexStr:sub((i - 1) * 2 + 1, i * 2), 16)
+        local a = actual[i] or 0
+        expectedHex[#expectedHex + 1] = string.format("%02X", e)
+        actualHex[#actualHex + 1] = string.format("%02X", a)
+        if e ~= a then
+            if firstDiff == -1 then firstDiff = i - 1 end
+            match = false
+        end
+    end
+
+    return {
+        success = true,
+        readable = true,
+        match = match,
+        first_diff_offset = firstDiff,
+        address = toHex(addr),
+        length = len,
+        expected = table.concat(expectedHex, " "),
+        actual = table.concat(actualHex, " "),
+    }
+end
+
+-- ---- UNIT-34 end -----------------------------------------------------------
+
 function cmd_dbvm_cloak_activate(params)
     local phys = tonumber(params.physical_base)
     if not phys then return { success = false, error = "physical_base is required", error_code = "INVALID_PARAMS" } end
@@ -7935,6 +8249,9 @@ commandHandlers.table_file_export            = cmd_table_file_export
 commandHandlers.table_file_delete            = cmd_table_file_delete
 commandHandlers.validate_pointer_chain       = cmd_validate_pointer_chain
 commandHandlers.ct_memory_records_health     = cmd_ct_memory_records_health
+commandHandlers.preflight                    = cmd_preflight
+commandHandlers.aob_health_scan              = cmd_aob_health_scan
+commandHandlers.inject_preview               = cmd_inject_preview
 commandHandlers.register_aa_command          = cmd_register_aa_command
 commandHandlers.unregister_aa_command        = cmd_unregister_aa_command
 commandHandlers.http_get                     = cmd_http_get

@@ -1976,6 +1976,32 @@ def ct_memory_records_health(limit: int = 1000) -> str:
     return format_result(call("ct_memory_records_health", {"limit": limit}))
 
 @mcp.tool()
+def ct_preflight(symbols: list[str] | None = None) -> str:
+    """One-shot session preflight: process, main module, game version, table, symbols.
+
+    Read-only port of a big CT's [ENABLE] self-check chain. Answers "is this
+    bridge + game + table session sane" in a single round trip instead of
+    probing each fact separately. Works with no process attached: failed
+    checks are reported honestly (ok=false) rather than erroring.
+
+    Args:
+        symbols: Optional list of up to 32 symbol/address expressions to
+            resolve (e.g. ["game.exe+10C4F30", "myAnchor"]). Each reports
+            resolved=true/false with its hex address. Overall ok requires the
+            process and main module only; table and symbols are advisory.
+
+    Returns JSON with: success, ok (bool), bridge_version, process_id,
+    target_arch, main_module ({name, base, size, is_64bit, path}),
+    game_version, table_path, memory_records, symbols (optional), checks
+    (per-item {name, ok, detail} in process -> main_module -> game_version ->
+    table -> symbols order). Error codes: INVALID_PARAMS (bad symbols array).
+    """
+    params: dict[str, Any] = {}
+    if symbols is not None:
+        params["symbols"] = symbols
+    return format_result(call("preflight", params))
+
+@mcp.tool()
 def get_memory_record(id: int | None = None, description: str | None = None) -> str:
     """Retrieve a single memory record by ID or description.
 
@@ -2426,6 +2452,29 @@ def compare_memory(addr1: str, addr2: str, size: int, method: int = 0) -> str:
     return format_result(call("compare_memory", {
         "addr1": addr1, "addr2": addr2, "size": size, "method": method
     }))
+
+@mcp.tool()
+def inject_preview(address: str, expected: str) -> str:
+    """Byte fingerprint gate: verify memory at an address BEFORE any write/inject.
+
+    Strictly read-only. Compares the bytes currently at the address against
+    the expected hex bytes; a mismatch means the game version changed or the
+    anchor hit the wrong spot. Refusing to patch then is the last line of
+    defence against corrupting the target. Wildcards are not accepted: a
+    fingerprint must be exact.
+
+    Args:
+        address: Target address (hex string like "game.exe+10C4F30", or number).
+        expected: Exact hex bytes, e.g. "48 89 5C 24 08" (spaces optional,
+            even length, max 256 bytes).
+
+    Returns JSON with: success, readable, match, first_diff_offset (-1 if
+    equal), address, length, expected, actual (hex byte strings). When
+    readable=false the target memory could not be read (match is meaningless).
+    Error codes: INVALID_ADDRESS, INVALID_PARAMS (empty/odd/non-hex/oversized
+    expected), NO_PROCESS.
+    """
+    return format_result(call("inject_preview", {"address": address, "expected": expected}))
 
 @mcp.tool()
 def write_region_to_file(address: str, size: int, filename: str) -> str:
@@ -3079,6 +3128,32 @@ def aob_scan_region(pattern: str, start: str, size: int = 0, end_address: str = 
     return format_result(call("aob_scan_region", p))
 
 @mcp.tool()
+def aob_health_scan(patterns: list[str], module: str = "", protection: str = "+X") -> str:
+    """Batch-verify a list of AOB anchor patterns against one module's range.
+
+    Read-only port of a big CT's aobList idea: all anchors verified together,
+    one result per pattern, answering "which of my signatures died after the
+    game update". Each pattern costs one native memscan on the CE main thread.
+
+    Args:
+        patterns: 1-256 AOB patterns (CE format, e.g. "48 89 5C 24 08";
+            {token} placeholders supported via set_signature_tokens).
+        module: Module name to scan within (e.g. "game.exe"); empty = main
+            module of the attached process.
+        protection: Memory protection filter (default "+X" for code anchors).
+
+    Returns JSON with: success, module, module_base, module_size, protection,
+    total, hits, misses, errors, hit_ratio (0-1), results (each with index,
+    status "hit"|"miss"|"error", pattern as expanded, address on hit, error
+    on error). Error codes: INVALID_PARAMS (>256 patterns, empty array),
+    INVALID_ADDRESS (module not resolvable), SCAN_ERROR, NO_PROCESS.
+    """
+    params: dict[str, Any] = {"patterns": patterns, "protection": protection}
+    if module:
+        params["module"] = module
+    return format_result(call("aob_health_scan", params))
+
+@mcp.tool()
 def diagnose_scan_failure(pattern: str, module_name: str = "", protection: str = "+X") -> str:
     """Explain why an AOB pattern does not match: compares the pattern against the
     module's file ON DISK vs LIVE MEMORY, and lists non-system (mod-like) modules.
@@ -3630,7 +3705,7 @@ _TOOL_CATEGORIES = {
     "list_bridge_methods": "core", "batch_call": "core", "get_audit_log": "core",
     "list_apis": "core", "table_state": "core", "evaluate_lua": "core",
     "get_process_info": "core", "open_process": "core", "wait_until": "core",
-    "dialog_enum": "core", "dialog_dismiss": "core",
+    "dialog_enum": "core", "dialog_dismiss": "core", "ct_preflight": "core",
 
     # --- memory ---
     "read_memory": "memory", "read_integer": "memory", "read_string": "memory",
@@ -3639,6 +3714,7 @@ _TOOL_CATEGORIES = {
     "checksum_memory": "memory", "write_integer": "memory",
     "write_memory": "memory", "write_string": "memory", "copy_memory": "memory",
     "compare_memory": "memory", "md5_memory": "memory",
+    "inject_preview": "memory",
     "create_section": "memory", "map_view_of_section": "memory",
     "allocate_memory": "memory", "free_memory": "memory",
     "allocate_shared_memory": "memory", "get_memory_protection": "memory",
@@ -3648,6 +3724,7 @@ _TOOL_CATEGORIES = {
     "scan_all": "scan", "next_scan": "scan", "get_scan_results": "scan",
     "aob_scan": "scan", "aob_scan_unique": "scan", "aob_scan_module": "scan",
     "aob_scan_module_unique": "scan", "aob_scan_region": "scan",
+    "aob_health_scan": "scan",
     "search_string": "scan", "diagnose_scan_failure": "scan",
     "set_signature_tokens": "scan", "get_signature_tokens": "scan",
     "pointer_rescan": "scan", "generate_signature": "scan",

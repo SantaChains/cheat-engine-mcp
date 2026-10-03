@@ -528,7 +528,8 @@ def run_self_test():
     c.check("circular payload becomes an error object, not an exception",
             json.loads(ce.format_result(circ)).get("error_code") == "INTERNAL_ERROR")
     c.check("new tools registered",
-            all(hasattr(ce, n) for n in ("bridge_status", "list_bridge_methods", "batch_call")))
+            all(hasattr(ce, n) for n in ("bridge_status", "list_bridge_methods", "batch_call",
+                                         "ct_preflight", "aob_health_scan", "inject_preview")))
 
     # ------------------------------------------------------------ alias check
     c.section("JSON-RPC alias / unknown method")
@@ -538,7 +539,7 @@ def run_self_test():
 
     # -------------------------------------------------- layered tool loading
     c.section("layered tool loading (UNIT-32)")
-    c.check("245 tools recorded at definition time", len(ce._TOOL_SPECS) == 245,
+    c.check("248 tools recorded at definition time", len(ce._TOOL_SPECS) == 248,
             len(ce._TOOL_SPECS))
     c.check("category catalog covers every tool",
             ce._uncategorized_tool_names() == [], ce._uncategorized_tool_names())
@@ -556,11 +557,11 @@ def run_self_test():
         return len(await server.list_tools())
 
     n_tools = asyncio.run(_count_tools(ce.mcp))
-    c.check("default profile registers 246 tools (245 + ce_tools_manage)",
-            n_tools == 246, n_tools)
+    c.check("default profile registers 249 tools (248 + ce_tools_manage)",
+            n_tools == 249, n_tools)
     catalog = json.loads(ce.ce_tools_manage("list"))
-    c.check("ce_tools_manage('list') reports 246 available",
-            catalog.get("success") is True and catalog.get("total_available") == 246,
+    c.check("ce_tools_manage('list') reports 249 available",
+            catalog.get("success") is True and catalog.get("total_available") == 249,
             results_to_text(catalog)[:120])
     enabled = json.loads(ce.ce_tools_manage("enabled"))
     c.check("ce_tools_manage('enabled') count matches list_tools",

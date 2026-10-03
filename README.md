@@ -2,7 +2,7 @@
 
 # Cheat Engine MCP Bridge — Native TCP Edition
 
-[![Version](https://img.shields.io/badge/version-15.7.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-Native%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/tools-246-brightgreen.svg)](#available-tools)
+[![Version](https://img.shields.io/badge/version-15.8.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-Native%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/tools-249-brightgreen.svg)](#available-tools)
 
 Let your AI assistant (Claude, Cursor, Codex, any MCP client) drive **Cheat Engine** directly:
 read and write process memory, scan for values, disassemble functions, set breakpoints,
@@ -103,7 +103,7 @@ Expected output:
 ```
 [MCP] CE x64 - loading ce_mcp_tcp_x64.dll
 [MCP] DLL loaded OK from: C:\Program Files\Cheat Engine\plugins\ce_mcp_tcp_x64.dll
-[MCP] Bridge v15.7.0 started on 127.0.0.1:17171 (native TCP, 1ms poll)
+[MCP] Bridge v15.8.0 started on 127.0.0.1:17171 (native TCP, 1ms poll)
 ```
 
 No window will pop up — the DLL debug console is hidden by default (`CE_MCP_DEBUG_CONSOLE=1` shows it without stealing focus).
@@ -225,7 +225,7 @@ By default the DLL binds to `127.0.0.1` only. For remote access set `CE_MCP_BIND
 Ask the AI: *"Ping Cheat Engine"*
 
 ```json
-{"success": true, "version": "15.7.0", "message": "CE MCP Bridge v15.7.0 alive"}
+{"success": true, "version": "15.8.0", "message": "CE MCP Bridge v15.8.0 alive"}
 ```
 
 ---
@@ -257,7 +257,7 @@ Ask the AI: *"Ping Cheat Engine"*
 
 ## Progressive Tool Loading
 
-246 tools with full JSON schemas in one `tools/list` costs a client a lot of context on every
+249 tools with full JSON schemas in one `tools/list` costs a client a lot of context on every
 session start. The server therefore loads tools in **layers**:
 
 - `CE_MCP_TOOLS=all` *(default)* — everything, exactly as before.
@@ -280,17 +280,17 @@ At runtime the always-registered **`ce_tools_manage`** tool extends the surface 
 
 ---
 
-## Available Tools (246 registered tools / 250 dispatcher methods)
+## Available Tools (249 registered tools / 253 dispatcher methods)
 
-The Python side records **245** `@mcp.tool()` functions plus the `ce_tools_manage` meta tool
-(**246** registered by default); the Lua dispatcher resolves **250** methods
+The Python side records **248** `@mcp.tool()` functions plus the `ce_tools_manage` meta tool
+(**249** registered by default); the Lua dispatcher resolves **253** methods
 (the difference is aliases such as `read_bytes` → `read_memory`, `status` → `bridge_status`).
 
 | Category | Tools | Examples |
 |----------|-------|----------|
-| **core** (always on) | 15 | `bridge_status`, `ping`, `evaluate_lua`, `batch_call`, `dialog_enum`, `ce_tools_manage` |
-| **memory** | 21 | `read_memory`, `write_memory`, `read_pointer_chain`, `validate_pointer_chain`, `allocate_memory` |
-| **scan** | 21 | `scan_all`, `aob_scan`, `aob_scan_unique`, `pointer_rescan`, `persistent_scan_*`, `generate_signature` |
+| **core** (always on) | 16 | `bridge_status`, `ping`, `ct_preflight`, `evaluate_lua`, `batch_call`, `dialog_enum`, `ce_tools_manage` |
+| **memory** | 22 | `read_memory`, `write_memory`, `read_pointer_chain`, `validate_pointer_chain`, `inject_preview`, `allocate_memory` |
+| **scan** | 22 | `scan_all`, `aob_scan`, `aob_scan_unique`, `aob_health_scan`, `pointer_rescan`, `persistent_scan_*`, `generate_signature` |
 | **disasm** | 9 | `disassemble`, `analyze_function`, `find_references`, `get_previous_opcode` |
 | **debug** | 22 | `set_breakpoint`, `debug_get_context`, `debug_continue`, `start_dbvm_watch` |
 | **process** | 16 | `open_process`*(core)*, `get_process_list`, `pause_process`, `set_speed`, `queue_to_main_thread` |

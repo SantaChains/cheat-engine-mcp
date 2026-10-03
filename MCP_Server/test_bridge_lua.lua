@@ -47,7 +47,7 @@ end
 
 -- ---------------------------------------------------------------- dispatcher
 print("== version / dispatcher ==")
-ok("version is 15.7.0", MCP_Bridge.version == "15.7.0", MCP_Bridge.version)
+ok("version is 15.8.0", MCP_Bridge.version == "15.8.0", MCP_Bridge.version)
 ok("batch / status / list_methods registered",
    MCP_Bridge.methods.batch and MCP_Bridge.methods.status and MCP_Bridge.methods.list_methods)
 local methodCount = 0
@@ -191,7 +191,7 @@ ok("string shorthand entry rejected as method-not-found",
 -- ------------------------------------------------------------- introspection
 print("== status / list_methods ==")
 local st = req("status")
-ok("status ok", st and st.result.success == true and st.result.version == "15.7.0")
+ok("status ok", st and st.result.success == true and st.result.version == "15.8.0")
 ok("method_count matches dispatcher", st and st.result.method_count == methodCount,
    st and st.result.method_count)
 ok("process_attached reflects CE state", st and st.result.process_attached == false)
@@ -207,7 +207,7 @@ ok("list_methods sorted", lm and lm.result.methods[1] <= lm.result.methods[2])
 local lmp = req("list_methods", { prefix = "dbk" })
 ok("prefix filter", lmp and lmp.result.total == 8 and lmp.result.methods[1] == "dbk_get_cr0",
    lmp and lmp.result.total)
-ok("status alias bridge_status", req("bridge_status").result.version == "15.7.0")
+ok("status alias bridge_status", req("bridge_status").result.version == "15.8.0")
 ok("list alias list_bridge_methods",
    req("list_bridge_methods", { limit = 1 }).result.total == methodCount)
 
@@ -965,6 +965,140 @@ readPointer, readBytes, getAddressList = _realReadPointer, _realReadBytes, _real
 end
 _test_unit33()
 
+-- ---- UNIT-34 (v15.8.0): preflight + AOB health scan + inject preview --------
+local function _test_unit34()
+print("== UNIT-34 session health ==")
+
+-- preflight works without a process and reports failed checks honestly
+local pf0 = req("preflight", {})
+ok("preflight: no process -> success, ok=false, 4 checks",
+   pf0 and pf0.result.success == true and pf0.result.ok == false
+   and #pf0.result.checks == 4, pf0 and json.encode(pf0.result))
+
+ok("preflight: empty symbols -> INVALID_PARAMS",
+   req("preflight", { symbols = {} }).result.error_code == "INVALID_PARAMS")
+ok("preflight: 33 symbols -> INVALID_PARAMS",
+   req("preflight", { symbols = { "s","s","s","s","s","s","s","s","s","s","s","s","s","s","s","s",
+                                 "s","s","s","s","s","s","s","s","s","s","s","s","s","s","s","s","s" } })
+     .result.error_code == "INVALID_PARAMS")
+ok("preflight: non-string symbol -> INVALID_PARAMS",
+   req("preflight", { symbols = { 42 } }).result.error_code == "INVALID_PARAMS")
+
+-- aob_health_scan: validation before the process guard
+ok("aob health: missing patterns -> INVALID_PARAMS",
+   req("aob_health_scan", {}).result.error_code == "INVALID_PARAMS")
+local manyP = {}
+for _ = 1, 257 do manyP[#manyP + 1] = "48 89 5C" end
+ok("aob health: 257 patterns -> INVALID_PARAMS",
+   req("aob_health_scan", { patterns = manyP }).result.error_code == "INVALID_PARAMS")
+ok("aob health: no process -> NO_PROCESS",
+   req("aob_health_scan", { patterns = { "48 89 5C" } }).result.error_code == "NO_PROCESS")
+
+-- inject_preview: validation before the process guard
+ok("inject preview: missing address -> INVALID_ADDRESS",
+   req("inject_preview", { expected = "48 89" }).result.error_code == "INVALID_ADDRESS")
+ok("inject preview: empty expected -> INVALID_PARAMS",
+   req("inject_preview", { address = "0x1000", expected = "" }).result.error_code == "INVALID_PARAMS")
+ok("inject preview: odd-length expected -> INVALID_PARAMS",
+   req("inject_preview", { address = "0x1000", expected = "48 8" }).result.error_code == "INVALID_PARAMS")
+ok("inject preview: non-hex expected -> INVALID_PARAMS",
+   req("inject_preview", { address = "0x1000", expected = "ZZ 89" }).result.error_code == "INVALID_PARAMS")
+ok("inject preview: wildcard rejected -> INVALID_PARAMS",
+   req("inject_preview", { address = "0x1000", expected = "48 ?? 5C" }).result.error_code == "INVALID_PARAMS")
+ok("inject preview: 257 bytes -> INVALID_PARAMS",
+   req("inject_preview", { address = "0x1000", expected = string.rep("00 ", 257) })
+     .result.error_code == "INVALID_PARAMS")
+ok("inject preview: valid params + no process -> NO_PROCESS",
+   req("inject_preview", { address = "0x1000", expected = "39 30 00 00" }).result.error_code == "NO_PROCESS")
+
+-- Scoped mocks: attached process, one main module, memscan factory, readBytes.
+local _realPid, _realEnum, _realMS, _realGMS = getOpenedProcessID, enumModules, createMemScan, getModuleSize
+do
+  getOpenedProcessID = function() return 0x1234 end
+  enumModules = function()
+    return { { Name = "game.exe", Address = 0x400000, Size = 0x100000,
+               Is64Bit = true, PathToFile = "C:/game/game.exe" } }
+  end
+
+  -- preflight with a live session: overall ok, module + symbol checks pass
+  local pf1 = req("preflight", { symbols = { "0x400000", "nothex" } })
+  ok("preflight: live session -> ok=true, module resolved",
+     pf1 and pf1.result.ok == true and pf1.result.main_module ~= nil
+     and pf1.result.main_module.name == "game.exe"
+     and pf1.result.main_module.base == "0x400000"
+     and pf1.result.process_id == 0x1234, pf1 and json.encode(pf1.result))
+  ok("preflight: symbols 1/2 resolved -> check fails",
+     pf1 and #pf1.result.checks == 5 and pf1.result.checks[5].ok == false
+     and pf1.result.symbols[1].resolved == true and pf1.result.symbols[1].address == "0x400000"
+     and pf1.result.symbols[2].resolved == false, pf1 and json.encode(pf1.result))
+
+  -- aob_health_scan: memscan factory missing -> per-pattern error, honest report
+  local ahErr = req("aob_health_scan", { patterns = { "48 89 5C" } })
+  ok("aob health: no memscan API -> per-pattern error status",
+     ahErr and ahErr.result.success == true and ahErr.result.total == 1
+     and ahErr.result.errors == 1 and ahErr.result.results[1].status == "error",
+     ahErr and json.encode(ahErr.result))
+
+  -- aob_health_scan: mocked memscan -> hit + miss + ratio (shared result queue:
+  -- the queue index spans scans, each createMemScan() consumes the next entry)
+  local scanQueue, scanIdx = {}, 0
+  createMemScan = function()
+    return {
+      setOnlyOneResult = function() end,
+      firstScan = function() end,
+      waitTillDone = function() end,
+      getOnlyResult = function() scanIdx = scanIdx + 1 return scanQueue[scanIdx] end,
+      destroy = function() end,
+    }
+  end
+  local ah = req("aob_health_scan", { patterns = { "48 89 5C", "90 90 90" } })
+  scanQueue, scanIdx = { 0x401234, false }, 0
+  local ahHit = req("aob_health_scan", { patterns = { "48 89 5C", "90 90 90" } })
+  ok("aob health: hit + miss -> ratio 0.5",
+     ahHit and ahHit.result.hits == 1 and ahHit.result.misses == 1
+     and ahHit.result.hit_ratio == 0.5
+     and ahHit.result.results[1].status == "hit"
+     and ahHit.result.results[1].address == "0x401234"
+     and ahHit.result.results[2].status == "miss"
+     and ahHit.result.module_base == "0x400000", ahHit and json.encode(ahHit.result))
+  ok("aob health: deterministic (rerun miss-only matches)",
+     ah and ah.result.hits == 0 and ah.result.misses == 2,
+     ah and json.encode(ah.result))
+
+  -- named module that cannot resolve -> INVALID_ADDRESS
+  ok("aob health: unresolvable module -> INVALID_ADDRESS",
+     req("aob_health_scan", { patterns = { "48" }, module = "game.exe" })
+       .result.error_code == "INVALID_ADDRESS")
+
+  -- named module by hex base with explicit size -> uses that scope
+  getModuleSize = function() return 0x1000 end
+  scanQueue, scanIdx = { 0x400800 }, 0
+  local ahMod = req("aob_health_scan", { patterns = { "AA BB" }, module = "0x400000" })
+  ok("aob health: explicit module scope hit",
+     ahMod and ahMod.result.success == true and ahMod.result.module_size == 0x1000
+     and ahMod.result.results[1].status == "hit", ahMod and json.encode(ahMod.result))
+
+  -- inject_preview against the default readBytes stub {0x39,0x30,0x00,0x00}
+  local ipEq = req("inject_preview", { address = "0x401000", expected = "39 30 00 00" })
+  ok("inject preview: matching fingerprint",
+     ipEq and ipEq.result.success == true and ipEq.result.readable == true
+     and ipEq.result.match == true and ipEq.result.first_diff_offset == -1
+     and ipEq.result.length == 4, ipEq and json.encode(ipEq.result))
+  local ipNe = req("inject_preview", { address = "0x401000", expected = "39 30 00 01" })
+  ok("inject preview: mismatch -> first_diff at byte 3",
+     ipNe and ipNe.result.match == false and ipNe.result.first_diff_offset == 3
+     and ipNe.result.actual == "39 30 00 00", ipNe and json.encode(ipNe.result))
+
+  readBytes = function() return nil end
+  local ipDead = req("inject_preview", { address = "0x401000", expected = "39 30" })
+  ok("inject preview: unreadable target -> readable=false",
+     ipDead and ipDead.result.success == true and ipDead.result.readable == false
+     and ipDead.result.match == false, ipDead and json.encode(ipDead.result))
+end
+getOpenedProcessID, enumModules, createMemScan, getModuleSize = _realPid, _realEnum, _realMS, _realGMS
+end
+_test_unit34()
+
 -- ---- stability / shock + large-data experiments (v15.7.0) -------------------
 local function _test_stability()
 print("== stability / large data ==")
@@ -1047,7 +1181,7 @@ ok("wrong token rejected AUTH_REQUIRED",
 
 local good = raw_call("status", { _auth = "sekret-token" })
 ok("correct token accepted", good.result and good.result.success == true
-   and good.result.version == "15.7.0", json.encode(good))
+   and good.result.version == "15.8.0", json.encode(good))
 
 local batch_good = raw_call("batch", { _auth = "sekret-token", calls = {
   { method = "status", params = {} },

@@ -1,6 +1,6 @@
 # DEV_GUIDE — cheatengine-mcp-tcp-bridge 开发者指南
 
-> 面向维护者与二次开发者。版本基线：Lua bridge **v15.7.0** / Native DLL **v3.3.5**。
+> 面向维护者与二次开发者。版本基线：Lua bridge **v15.8.0** / Native DLL **v3.3.5**。
 > 所有数字（上限、端口、超时）均为代码中的真实常量，非建议值。
 
 ---
@@ -586,3 +586,42 @@ mypy 0 errors、luac/py_compile OK。
 x86 145,920 B md5 f4ed7668…；vcvars 依赖 reg.exe 被沙箱拦截，改用手工
 INCLUDE/LIB 环境直接调 cl.exe，flags 与 build.bat 逐字一致）。
 **用户侧：需把新 DLL 复制到 CE plugins 并重载桥脚本。**
+
+## 17. CT 健康检查借鉴轮（v15.8.0，UNIT-34）
+
+### 1. 背景与取舍
+
+研究大 CT（Hexinton 主表）自带的启动自检链、aobList 全锚点扫描、字节级兜底、
+版本校验等机制（详见会话记录），结合 CE 社区惯例（syntaxcheck 短路、清理前置、
+字节指纹校验、AOB 签名质量原则），按「**稳定的才加进来**」原则筛选：
+
+**采纳（3 个，全部严格只读）**：
+- `preflight`（core）：一次性会话体检——进程/主模块/游戏版本/已加载表/可选符号
+  解析五查合一，镜像大 CT [ENABLE] 自检链；无进程时诚实降级（ok=false 不报错）。
+- `aob_health_scan`（scan）：批量 AOB 锚点验活（≤256 条/次，每条一次原生 memscan），
+  端口大 CT aobList 思想；逐条 status hit/miss/error + hit_ratio。
+- `inject_preview`（memory）：字节指纹门禁——写入/注入前比对目标字节与预期
+  hex（≤256 B，禁通配符），不匹配即拒绝的最后一道闸（AOB 命中错误位置防护）。
+
+**不采纳（记录原因）**：`toggle_entry` 自复位封装（变异类，与
+`set_memory_record_active`+读回重叠，等 CE 7.7 OnActivationFailure 官方回调）；
+AOB 签名质量评分（启发式，不稳定）；`aa_syntax_check`（`auto_assemble_check`
+已存在）；版本对账（`game_version` 已并入 preflight）。
+
+### 2. 实现要点
+
+- 全部走既有契约：参数校验先于进程守卫、`error_code` 规范、`toHex` 地址格式、
+  memscan 快路径与 `aob_scan_region` unique 分支同款（`setOnlyOneResult` +
+  `firstScan(soExactValue, vtByteArray, ...)` + `waitTillDone` + `destroy`）。
+- `preflight` 复用 `mainModuleExePath`/`gameVersionString`/`unit18_get_al`，
+  并在无进程时逐项报告失败 check 而非报错退出。
+- Python 侧 3 个工具全注解 + 完整 docstring（含错误码与预算说明），
+  分类目录同步（ct_preflight→core、inject_preview→memory、aob_health_scan→scan）。
+
+### 3. 测试与产物
+
+Lua **265/0**（+24：UNIT-34 preflight 无进程降级/symbols 校验/活会话模块解析、
+AOB 队列 mock hit+miss+ratio、模块解析失败/显式模块命中、inject 预检 7 例 +
+指纹命中/失配/不可读）、Python **45/0**（计数断言 245→248、246→249，新工具
+注册断言）、mypy **0 errors**、luac OK。
+工具面：**248 记录 + ce_tools_manage = 249 注册 / Lua 调度 253**。
