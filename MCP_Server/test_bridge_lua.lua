@@ -47,7 +47,7 @@ end
 
 -- ---------------------------------------------------------------- dispatcher
 print("== version / dispatcher ==")
-ok("version is 15.6.0", MCP_Bridge.version == "15.6.0", MCP_Bridge.version)
+ok("version is 15.6.1", MCP_Bridge.version == "15.6.1", MCP_Bridge.version)
 ok("batch / status / list_methods registered",
    MCP_Bridge.methods.batch and MCP_Bridge.methods.status and MCP_Bridge.methods.list_methods)
 local methodCount = 0
@@ -191,7 +191,7 @@ ok("string shorthand entry rejected as method-not-found",
 -- ------------------------------------------------------------- introspection
 print("== status / list_methods ==")
 local st = req("status")
-ok("status ok", st and st.result.success == true and st.result.version == "15.6.0")
+ok("status ok", st and st.result.success == true and st.result.version == "15.6.1")
 ok("method_count matches dispatcher", st and st.result.method_count == methodCount,
    st and st.result.method_count)
 ok("process_attached reflects CE state", st and st.result.process_attached == false)
@@ -207,7 +207,7 @@ ok("list_methods sorted", lm and lm.result.methods[1] <= lm.result.methods[2])
 local lmp = req("list_methods", { prefix = "dbk" })
 ok("prefix filter", lmp and lmp.result.total == 8 and lmp.result.methods[1] == "dbk_get_cr0",
    lmp and lmp.result.total)
-ok("status alias bridge_status", req("bridge_status").result.version == "15.6.0")
+ok("status alias bridge_status", req("bridge_status").result.version == "15.6.1")
 ok("list alias list_bridge_methods",
    req("list_bridge_methods", { limit = 1 }).result.total == methodCount)
 
@@ -860,7 +860,35 @@ ok("set_speed / create_hotkey / dbvm_cloak_write audited",
    seen["set_speed"] and seen["create_hotkey"] and seen["dbvm_cloak_write"],
    al31 and json.encode(al31.result.entries))
 
--- ---- auth gate (CE_MCP_AUTH_TOKEN, v15.6.0) ----------------------------------------------------------
+-- ---- v15.6.1: exact-set audit coverage + clamps -------------------------------------------------
+print("== v15.6.1 quality pass ==")
+-- evaluate_lua must be audited even though the "evaluate_" prefix only covers
+-- the execute_code family... it does not match any prefix; the exact set does.
+local al_eval = req("get_audit_log", { limit = 200 })
+local evalSeen = false
+if al_eval then for _, e in ipairs(al_eval.result.entries) do
+  if e.method == "evaluate_lua" then evalSeen = true end
+end end
+ok("evaluate_lua audited via exact set", evalSeen)
+
+-- clamps: oversize requests fail fast with INVALID_PARAMS instead of freezing CE
+local bigCopy = req("copy_memory", { source = "0x401000", size = 65 * 1024 * 1024 })
+ok("copy_memory 64MiB clamp", bigCopy and bigCopy.result.success == false
+   and bigCopy.result.error_code == "INVALID_PARAMS", json.encode(bigCopy))
+local bigCmp = req("compare_memory", { addr1 = "0x401000", addr2 = "0x402000", size = 65 * 1024 * 1024 })
+ok("compare_memory 64MiB clamp", bigCmp and bigCmp.result.success == false
+   and bigCmp.result.error_code == "INVALID_PARAMS", json.encode(bigCmp))
+local bigMd5 = req("md5_memory", { address = "0x401000", size = 17 * 1024 * 1024 })
+ok("md5_memory 16MiB clamp", bigMd5 and bigMd5.result.success == false
+   and bigMd5.result.error_code == "INVALID_PARAMS", json.encode(bigMd5))
+local bigStr = req("read_string", { address = "0x401000", max_length = 1024 * 1024 + 1 })
+ok("read_string 1MiB clamp accepted (clamped, no-process error only)",
+   bigStr ~= nil, json.encode(bigStr))
+local oobWrite = req("write_integer", { address = "0x401000", value = 300, type = "byte" })
+ok("write_integer range message", oobWrite and oobWrite.result.success == false
+   and tostring(oobWrite.result.error):find("out of range") ~= nil, json.encode(oobWrite))
+
+-- ---- auth gate (CE_MCP_AUTH_TOKEN, v15.6.1) ----------------------------------------------------------
 -- Reload the bridge with a stubbed os.getenv so AUTH_TOKEN is resolved as set.
 -- Encapsulated in a function: the main chunk is at Lua's 200-local limit.
 local function auth_gate_tests()
@@ -888,7 +916,7 @@ ok("wrong token rejected AUTH_REQUIRED",
 
 local good = raw_call("status", { _auth = "sekret-token" })
 ok("correct token accepted", good.result and good.result.success == true
-   and good.result.version == "15.6.0", json.encode(good))
+   and good.result.version == "15.6.1", json.encode(good))
 
 local batch_good = raw_call("batch", { _auth = "sekret-token", calls = {
   { method = "status", params = {} },

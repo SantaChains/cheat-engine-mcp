@@ -15,7 +15,7 @@
 -- CE_TRANSPORT=pipe option no longer has a counterpart here.
 -- ============================================================================
 
-local VERSION = "15.6.0"
+local VERSION = "15.6.1"
 
 local TCP_BASE_PORT = 17171
 -- Security default: loopback only. Remote debugging is opt-in via the
@@ -26,16 +26,23 @@ local TCP_BIND      = "127.0.0.1"
 -- "0.0.0.0" for remote debugging across a trusted LAN). The DLL applies the
 -- same override, so setting it before CE starts is sufficient; this Lua-side
 -- read exists so the effective bind address is visible in the start log.
-local function resolveBindAddr()
+-- Read one environment variable through CE's accessor when available, with
+-- os.getenv as fallback. Returns nil when unset/empty. (Single implementation:
+-- CE_MCP_BIND and CE_MCP_AUTH_TOKEN both go through here.)
+local function readEnvVar(name)
     if type(getEnvironmentVariable) == "function" then
-        local ok, v = pcall(getEnvironmentVariable, "CE_MCP_BIND")
+        local ok, v = pcall(getEnvironmentVariable, name)
         if ok and type(v) == "string" and v ~= "" then return v end
     end
     if type(os) == "table" and type(os.getenv) == "function" then
-        local ok, v = pcall(os.getenv, "CE_MCP_BIND")
+        local ok, v = pcall(os.getenv, name)
         if ok and type(v) == "string" and v ~= "" then return v end
     end
     return nil
+end
+
+local function resolveBindAddr()
+    return readEnvVar("CE_MCP_BIND")
 end
 
 -- Optional shared-token authentication (design borrowed from the
@@ -45,18 +52,20 @@ end
 -- AUTH_REQUIRED before any handler runs (batch sub-commands included, since
 -- the check sits in executeCommand, the single entry point). Unset on both
 -- sides = open loopback access (the default).
-local function resolveAuthToken()
-    if type(getEnvironmentVariable) == "function" then
-        local ok, v = pcall(getEnvironmentVariable, "CE_MCP_AUTH_TOKEN")
-        if ok and type(v) == "string" and v ~= "" then return v end
+-- Unset on both
+-- sides = open loopback access (the default).
+local AUTH_TOKEN = readEnvVar("CE_MCP_AUTH_TOKEN")
+
+-- Length-independent comparison so token probing cannot timing-oracle the
+-- secret byte-by-byte. (Lua's `~` is bitwise XOR, CE ships Lua 5.3+.)
+local function secureTokenEq(a, b)
+    if type(a) ~= "string" or type(b) ~= "string" or #a ~= #b then
+        return false
     end
-    if type(os) == "table" and type(os.getenv) == "function" then
-        local ok, v = pcall(os.getenv, "CE_MCP_AUTH_TOKEN")
-        if ok and type(v) == "string" and v ~= "" then return v end
-    end
-    return nil
+    local diff = 0
+    for i = 1, #a do diff = diff | (a:byte(i) ~ b:byte(i)) end
+    return diff == 0
 end
-local AUTH_TOKEN = resolveAuthToken()
 
 -- CE constant fallbacks (some CE builds may not expose all globals)
 -- Value types
@@ -146,9 +155,6 @@ end
 local function toHexLow32(num)
     if not num then return nil end
     return num & 0xFFFFFFFF
-end
-
-local function log(msg)
 end
 
 -- Universal 32/64-bit architecture helper
@@ -298,18 +304,50 @@ local MAX_AUDIT_PARAM_STR = 96
 
 -- Prefix match is intentional: it stays correct for aliases and new commands
 -- that follow the naming convention (write_*, set_*, create_*, ...).
+-- AUDIT_MUTATING_EXACT catches mutating commands whose names the prefixes
+-- miss (run_command, the debug_* family, watch/table_file/evaluate_lua, ...).
+-- Read-only dbk_get_cr*/dbk_read_msr/dbvm_read_msr/dbvm_cloak_read DO match
+-- the "dbk_"/"dbvm_" prefixes and are audited anyway: over-recording is the
+-- safe side, and the distinction is not worth a third list.
 local AUDIT_MUTATING_PREFIXES = {
     "write_", "set_", "create_", "delete_", "execute_", "inject_",
     "load_table", "save_table", "register_", "unregister_",
     "append_memory_record", "open_process", "pause_process", "unpause_process",
     "auto_assemble", "compile_", "map_memory", "unmap_memory", "copy_memory",
     "free_memory", "allocate_", "full_access", "key_down", "key_up",
-    "do_key_press", "shell_execute", "dbk_writes_", "patch_", "undo_",
-    "remove_", "dbk_", "dbvm_", "dissect_code_load", "dissect_code_clear",
+    "do_key_press", "shell_execute", "patch_", "undo_", "remove_",
+    "dbk_", "dbvm_",
+}
+
+local AUDIT_MUTATING_EXACT = {
+    run_command = true,
+    evaluate_lua = true,
+    auto_guess_structure = true,
+    clear_all_breakpoints = true,
+    start_dbvm_watch = true,
+    stop_dbvm_watch = true,
+    find_what_writes_safe = true,
+    find_what_accesses_safe = true,
+    set_execution_breakpoint = true,
+    set_write_breakpoint = true,
+    debug_set_context = true,
+    debug_set_breakpoint_for_thread = true,
+    debug_remove_breakpoint_for_thread = true,
+    debug_set_last_branch_recording = true,
+    debug_process = true,
+    debug_continue = true,
+    debug_detach = true,
+    debug_break_thread = true,
+    map_view_of_section = true,
+    read_region_from_file = true,
+    table_file_create = true,
+    table_file_delete = true,
+    table_file_export = true,
 }
 
 local function isMutatingMethod(method)
     if type(method) ~= "string" then return false end
+    if AUDIT_MUTATING_EXACT[method] then return true end
     for _, p in ipairs(AUDIT_MUTATING_PREFIXES) do
         if method:sub(1, #p) == p then return true end
     end
@@ -616,7 +654,6 @@ end
 -- Prevents "zombie" breakpoints and DBVM watches when script is reloaded
 
 local function cleanupZombieState()
-    log("Cleaning up zombie resources...")
     local cleaned = { breakpoints = 0, dbvm_watches = 0, scans = 0 }
     
     -- 1. Remove all Hardware Breakpoints managed by us
@@ -675,12 +712,6 @@ local function cleanupZombieState()
     for k in pairs(mappedMemoryMDL) do mappedMemoryMDL[k] = nil end
 
     serverState.persistent_scans = {}
-
-    if cleaned.breakpoints > 0 or cleaned.dbvm_watches > 0 or cleaned.scans > 0
-       or (cleaned.mappings or 0) > 0 then
-        log(string.format("Cleaned: %d breakpoints, %d DBVM watches, %d scans, %d mappings",
-            cleaned.breakpoints, cleaned.dbvm_watches, cleaned.scans, cleaned.mappings or 0))
-    end
 
     -- Extension point (reserved for additive units):
     -- Any new long-lived resource added to serverState must get a teardown entry
@@ -961,8 +992,12 @@ local function aobScanPEModules(maxCount)
 end
 
 function cmd_get_process_info(params)
-    -- FORCE REFRESH: Tell CE to try and reload symbols using current DBVM rights
-    pcall(reinitializeSymbolhandler)
+    -- reinitializeSymbolhandler is expensive (rescans all modules for
+    -- symbols); polling this tool used to force a full reload every call.
+    -- Opt in explicitly with refresh_symbols=true when fresh symbols matter.
+    if params.refresh_symbols == true then
+        pcall(reinitializeSymbolhandler)
+    end
     
     local pid = getOpenedProcessID()
     if pid and pid > 0 then
@@ -1160,7 +1195,11 @@ end
 
 function cmd_read_string(params)
     local addr = params.address
-    local maxlen = params.max_length or 256
+    local maxlen = tonumber(params.max_length) or 256
+    -- Every byte flows through readString/readBytes plus per-byte escaping on
+    -- the CE main thread; an unclamped max_length would freeze CE.
+    if maxlen < 1 then maxlen = 1 end
+    if maxlen > 1024 * 1024 then maxlen = 1024 * 1024 end
     local wide = params.wide or false
     -- encoding: "ascii" | "utf8" | "utf16le" | "raw" (default "utf8")
     -- Backward compat: wide=true maps to utf16le unless encoding is explicitly set
@@ -1418,7 +1457,9 @@ function cmd_next_scan(params)
     ms.waitTillDone()
     
     if serverState.scan_foundlist then
-        serverState.scan_foundlist.destroy()
+        -- destroy() can throw when the previous scan session was torn down
+        -- externally; scan_all guards the same call, so does next_scan.
+        pcall(function() serverState.scan_foundlist.destroy() end)
     end
     local fl = createFoundList(ms)
     fl.initialize()
@@ -1437,15 +1478,15 @@ function cmd_write_integer(params)
 
     if vtype == "byte" then
         if type(value) ~= "number" or value < 0 or value > 0xFF then
-            return { success = false, error = "Value too large for type", error_code = "INVALID_PARAMS" }
+            return { success = false, error = "Value out of range for type", error_code = "INVALID_PARAMS" }
         end
     elseif vtype == "word" or vtype == "2bytes" then
         if type(value) ~= "number" or value < 0 or value > 0xFFFF then
-            return { success = false, error = "Value too large for type", error_code = "INVALID_PARAMS" }
+            return { success = false, error = "Value out of range for type", error_code = "INVALID_PARAMS" }
         end
     elseif vtype == "dword" or vtype == "4bytes" then
         if type(value) ~= "number" or value < 0 or value > 0xFFFFFFFF then
-            return { success = false, error = "Value too large for type", error_code = "INVALID_PARAMS" }
+            return { success = false, error = "Value out of range for type", error_code = "INVALID_PARAMS" }
         end
     end
 
@@ -1583,7 +1624,10 @@ end
 
 function cmd_find_function_boundaries(params)
     local addr = params.address
-    local maxSearch = params.max_search or 4096
+    local maxSearch = tonumber(params.max_search) or 4096
+    -- One readBytes round-trip per offset below; unclamped max_search = freeze.
+    if maxSearch < 16 then maxSearch = 16 end
+    if maxSearch > 65536 then maxSearch = 65536 end
 
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address" } end
@@ -1734,7 +1778,12 @@ function cmd_find_references(params)
     end
 
     local allRefs = {}
+    -- Each hit costs a disassemble() on the CE main thread; cap the loop and
+    -- report truncation instead of freezing CE on a pointer with many refs.
+    local MAX_DISASM_REFS = 4096
+    local refTruncated = false
     for i = 0, scanResults.Count - 1 do
+        if #allRefs >= MAX_DISASM_REFS then refTruncated = true break end
         local refAddr = tonumber(scanResults.getString(i), 16)
         local disasm = disassemble(refAddr) or "???"
         allRefs[#allRefs + 1] = { address = toHex(refAddr), instruction = disasm }
@@ -1742,7 +1791,7 @@ function cmd_find_references(params)
     scanResults.destroy()
 
     local limit, offset, page, total = paginate(params, allRefs, 50)
-    return { success = true, target = toHex(targetAddr), total = total, offset = offset, limit = limit, returned = #page, references = page, arch = is64 and "x64" or "x86" }
+    return { success = true, target = toHex(targetAddr), total = total, offset = offset, limit = limit, returned = #page, references = page, truncated = refTruncated, arch = is64 and "x64" or "x86" }
 end
 
 function cmd_find_call_references(params)
@@ -1751,12 +1800,17 @@ function cmd_find_call_references(params)
     if type(funcAddr) == "string" then funcAddr = getAddressSafe(funcAddr) end
     if not funcAddr then return { success = false, error = "Invalid function address" } end
 
-    -- Collect ALL matching callers to get accurate total for pagination
+    -- Collect ALL matching callers to get accurate total for pagination.
+    -- readInteger per E8 site adds up fast across a whole address space; cap
+    -- the walk and report truncation instead of freezing CE.
+    local MAX_CALL_SITES = 100000
+    local callTruncated = false
     local allCallers = {}
     local scanResults = AOBScan("E8 ?? ?? ?? ??", "+X")
 
     if scanResults then
         for i = 0, scanResults.Count - 1 do
+            if i >= MAX_CALL_SITES then callTruncated = true break end
             local callAddr = tonumber(scanResults.getString(i), 16)
             local relOffset = readInteger(callAddr + 1)
 
@@ -1776,7 +1830,7 @@ function cmd_find_call_references(params)
     end
 
     local limit, offset, page, total = paginate(params, allCallers, 100)
-    return { success = true, function_address = toHex(funcAddr), total = total, offset = offset, limit = limit, returned = #page, callers = page }
+    return { success = true, function_address = toHex(funcAddr), total = total, offset = offset, limit = limit, returned = #page, callers = page, truncated = callTruncated }
 end
 
 -- ============================================================================
@@ -2710,8 +2764,6 @@ function cmd_start_dbvm_watch(params)
     -- 4. Start the appropriate watch based on mode
     local watch_id
     local okWatch, result
-    
-    log(string.format("Starting DBVM watch on Phys: 0x%X (Mode: %s)", phys, mode))
 
     if mode == "x" then
         if not dbvm_watch_executes then
@@ -2855,17 +2907,25 @@ function cmd_stop_dbvm_watch(params)
     
     local watch_id = watchInfo.id
     local results = {}
-    
+
     -- 1. Retrieve the log of all memory accesses
     local okLog, log = pcall(dbvm_watch_retrievelog, watch_id)
-    
+
     if okLog and log then
-        -- Parse each log entry (contains CPU context at time of access)
+        -- Each entry costs a disassemble() on the CE main thread; cap like the
+        -- other DBVM log paths and report truncation.
+        local MAX_STOP_HITS = 10000
         for i, entry in ipairs(log) do
+            if i > MAX_STOP_HITS then break end
+            local instruction = "???"
+            if entry.RIP then
+                local okDis, dis = pcall(disassemble, entry.RIP)
+                if okDis and dis then instruction = dis end
+            end
             local hitData = {
                 hit_number = i,
                 instruction_address = entry.RIP and toHex(entry.RIP) or nil,
-                instruction = entry.RIP and (pcall(disassemble, entry.RIP) and disassemble(entry.RIP) or "???") or "???",
+                instruction = instruction,
                 -- CPU registers at time of access
                 registers = {
                     RAX = entry.RAX and toHex(entry.RAX) or nil,
@@ -2899,6 +2959,7 @@ function cmd_stop_dbvm_watch(params)
         hit_count = #results,
         duration_seconds = duration,
         hits = results,
+        truncated = okLog and log ~= nil and #log > #results or false,
         note = #results > 0 and "Found instructions that accessed the memory" or "No accesses detected during monitoring"
     }
 end
@@ -4732,9 +4793,8 @@ end
 
 
 function cmd_copy_memory(params)
-    local pid = getOpenedProcessID()
-    if not pid or pid == 0 then return { success = false, error = "No process attached" } end
-
+    -- Params first, process guard second: INVALID_PARAMS is actionable even
+    -- before a process is attached.
     local src = params.source
     local size = params.size
     local dest = params.dest  -- may be nil
@@ -4742,6 +4802,13 @@ function cmd_copy_memory(params)
 
     if not src then return { success = false, error = "Missing source address" } end
     if not size or size <= 0 then return { success = false, error = "Missing or invalid size" } end
+    if size > 64 * 1024 * 1024 then
+        return { success = false, error_code = "INVALID_PARAMS",
+                 error = "size exceeds the 64 MiB copy_memory limit" }
+    end
+
+    local pid = getOpenedProcessID()
+    if not pid or pid == 0 then return { success = false, error = "No process attached" } end
 
     if type(src) == "string" then src = getAddressSafe(src) end
     if not src then return { success = false, error = "Invalid source address" } end
@@ -4762,9 +4829,7 @@ function cmd_copy_memory(params)
 end
 
 function cmd_compare_memory(params)
-    local pid = getOpenedProcessID()
-    if not pid or pid == 0 then return { success = false, error = "No process attached" } end
-
+    -- Params first, process guard second (see cmd_copy_memory).
     local addr1 = params.addr1
     local addr2 = params.addr2
     local size = params.size
@@ -4773,6 +4838,13 @@ function cmd_compare_memory(params)
     if not addr1 then return { success = false, error = "Missing addr1" } end
     if not addr2 then return { success = false, error = "Missing addr2" } end
     if not size or size <= 0 then return { success = false, error = "Missing or invalid size" } end
+    if size > 64 * 1024 * 1024 then
+        return { success = false, error_code = "INVALID_PARAMS",
+                 error = "size exceeds the 64 MiB compare_memory limit" }
+    end
+
+    local pid = getOpenedProcessID()
+    if not pid or pid == 0 then return { success = false, error = "No process attached" } end
 
     if type(addr1) == "string" then addr1 = getAddressSafe(addr1) end
     if type(addr2) == "string" then addr2 = getAddressSafe(addr2) end
@@ -4840,14 +4912,21 @@ function cmd_read_region_from_file(params)
 end
 
 function cmd_md5_memory(params)
-    local pid = getOpenedProcessID()
-    if not pid or pid == 0 then return { success = false, error = "No process attached" } end
-
+    -- Params first, process guard second (see cmd_copy_memory).
     local addr = params.address
     local size = params.size
 
     if not addr then return { success = false, error = "Missing address" } end
     if not size or size <= 0 then return { success = false, error = "Missing or invalid size" } end
+    -- Matches the documented 16 MiB cap (AGENTS.md "memory-MD5 size <= 16 MiB");
+    -- md5memory walks the whole region on the CE main thread.
+    if size > 16 * 1024 * 1024 then
+        return { success = false, error_code = "INVALID_PARAMS",
+                 error = "size exceeds the 16 MiB md5_memory limit; hash in chunks (checksum_memory)" }
+    end
+
+    local pid = getOpenedProcessID()
+    if not pid or pid == 0 then return { success = false, error = "No process attached" } end
 
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address" } end
@@ -7577,24 +7656,33 @@ function cmd_dbk_use_kernelmode(params)
     return { success = true, mode = mode }
 end
 
-function cmd_dbk_read_msr(params)
-    local msr = tonumber(params.msr)
-    if not msr then return { success = false, error = "msr index is required", error_code = "INVALID_PARAMS" } end
-    local res = gapCall("dbk_readMSR", msr)
-    if type(res) == "table" then return res end
-    return { success = true, msr = msr, value = res }
+-- MSR handlers come in read/write pairs that differ only in the CE function
+-- and whether a value is passed; build them from one factory each way.
+local function makeMsrRead(gapFn)
+    return function(params)
+        local msr = tonumber(params.msr)
+        if not msr then return { success = false, error = "msr index is required", error_code = "INVALID_PARAMS" } end
+        local res = gapCall(gapFn, msr)
+        if type(res) == "table" then return res end
+        return { success = true, msr = msr, value = res }
+    end
 end
 
-function cmd_dbk_write_msr(params)
-    local msr = tonumber(params.msr)
-    local value = params.value
-    if not msr or value == nil then
-        return { success = false, error = "msr and value are required", error_code = "INVALID_PARAMS" }
+local function makeMsrWrite(gapFn)
+    return function(params)
+        local msr = tonumber(params.msr)
+        local value = params.value
+        if not msr or value == nil then
+            return { success = false, error = "msr and value are required", error_code = "INVALID_PARAMS" }
+        end
+        local res = gapCall(gapFn, msr, value)
+        if type(res) == "table" then return res end
+        return { success = true, msr = msr }
     end
-    local res = gapCall("dbk_writeMSR", msr, value)
-    if type(res) == "table" then return res end
-    return { success = true, msr = msr }
 end
+
+cmd_dbk_read_msr  = makeMsrRead("dbk_readMSR")
+cmd_dbk_write_msr = makeMsrWrite("dbk_writeMSR")
 
 -- ---- DBVM hypervisor interface (safe subset) -------------------------------------------
 -- traceonbp_* and bp_* families are intentionally NOT wrapped: they require
@@ -7607,24 +7695,8 @@ function cmd_dbvm_initialize(params)
     return { success = true }
 end
 
-function cmd_dbvm_read_msr(params)
-    local msr = tonumber(params.msr)
-    if not msr then return { success = false, error = "msr index is required", error_code = "INVALID_PARAMS" } end
-    local res = gapCall("dbvm_readMSR", msr)
-    if type(res) == "table" then return res end
-    return { success = true, msr = msr, value = res }
-end
-
-function cmd_dbvm_write_msr(params)
-    local msr = tonumber(params.msr)
-    local value = params.value
-    if not msr or value == nil then
-        return { success = false, error = "msr and value are required", error_code = "INVALID_PARAMS" }
-    end
-    local res = gapCall("dbvm_writeMSR", msr, value)
-    if type(res) == "table" then return res end
-    return { success = true, msr = msr }
-end
+cmd_dbvm_read_msr  = makeMsrRead("dbvm_readMSR")
+cmd_dbvm_write_msr = makeMsrWrite("dbvm_writeMSR")
 
 function cmd_dbvm_cloak_activate(params)
     local phys = tonumber(params.physical_base)
@@ -8055,10 +8127,11 @@ local function executeCommand(jsonRequest)
     if type(params) ~= "table" then params = {} end
     local id = request.id
 
-    -- Shared-token gate (see resolveAuthToken). Stripped from params right
-    -- after the check so handlers and the audit log never see the token.
+    -- Shared-token gate (readEnvVar("CE_MCP_AUTH_TOKEN")). Stripped from
+    -- params right after the check so handlers and the audit log never see
+    -- the token.
     if AUTH_TOKEN ~= nil then
-        if params._auth ~= AUTH_TOKEN then
+        if not secureTokenEq(params._auth, AUTH_TOKEN) then
             return safeEncode({ jsonrpc = "2.0", id = id,
                 error = { code = -32000, message = "Authentication failed",
                           data = { error_code = "AUTH_REQUIRED",

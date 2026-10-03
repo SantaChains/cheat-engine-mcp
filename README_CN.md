@@ -2,7 +2,7 @@
 
 # Cheat Engine MCP Bridge — 原生 TCP 版
 
-[![Version](https://img.shields.io/badge/version-15.6.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-原生%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/工具-244-brightgreen.svg)](#可用工具)
+[![Version](https://img.shields.io/badge/version-15.6.1-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-原生%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/工具-244-brightgreen.svg)](#可用工具)
 
 让你的 AI 助手（Claude、Cursor、Codex、任何 MCP 客户端）直接驱动 **Cheat Engine**：
 读写进程内存、扫描数值、反汇编函数、下断点、注入代码、操作 CT 表——**198 个 MCP 工具**，
@@ -99,7 +99,7 @@ dofile([[C:\path\to\MCP_Server\ce_mcp_bridge.lua]])
 ```
 [MCP] CE x64 - loading ce_mcp_tcp_x64.dll
 [MCP] DLL loaded OK from: C:\Program Files\Cheat Engine\plugins\ce_mcp_tcp_x64.dll
-[MCP] Bridge v15.6.0 started on 127.0.0.1:17171 (native TCP, 1ms poll)
+[MCP] Bridge v15.6.1 started on 127.0.0.1:17171 (native TCP, 1ms poll)
 ```
 
 不会弹出任何窗口——DLL 调试控制台默认隐藏（`CE_MCP_DEBUG_CONSOLE=1` 可显示，且不抢焦点）。
@@ -217,7 +217,7 @@ DLL 默认只绑定 `127.0.0.1`。远程访问需在 CE 机器启动前设置环
 问 AI：*"Ping 一下 Cheat Engine"*
 
 ```json
-{"success": true, "version": "15.6.0", "message": "CE MCP Bridge v15.6.0 alive"}
+{"success": true, "version": "15.6.1", "message": "CE MCP Bridge v15.6.1 alive"}
 ```
 
 ---
@@ -239,8 +239,9 @@ DLL 默认只绑定 `127.0.0.1`。远程访问需在 CE 机器启动前设置环
 | `CE_MCP_TOOLS` | `all` | **工具加载剖面**：`all` / `core`（别名 `minimal`）/ `core,memory,debug,...`——见[分层渐进式工具加载](#分层渐进式工具加载) |
 | `CE_MCP_AUTH_TOKEN` | *(未设置)* | 共享令牌认证：两端设同值后，每个请求自动携带 `params._auth`，其余被桥以 `AUTH_REQUIRED` 拒绝 |
 
-> 超时的命令**绝不重试**：它可能已在 CE 内执行过（`write_memory`、`auto_assemble`、`inject_dll`、
-> `execute_code`），重放会把副作用应用两次。超时直接断开 socket。
+> **可能已执行过的命令绝不重试**。涵盖超时的命令与「请求帧已完整送达后」的任何失败——
+> `write_memory`、`auto_assemble`、`inject_dll`、`execute_code` 可能已经生效，重放会把副作用
+> 应用两次。只有帧未送达的失败（连接/发送失败）才允许重试。超时直接断开 socket。
 
 ---
 

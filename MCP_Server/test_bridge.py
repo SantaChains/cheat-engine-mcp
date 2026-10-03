@@ -584,6 +584,78 @@ def run_self_test():
     c.check("no _auth field when token unset", "_auth" not in wire["params"],
             wire["params"])
 
+    # ------------------------------------------------- no-replay retry semantics
+    c.section("no-replay retry semantics (v15.6.1)")
+    rcli = ce.TCPBridgeClient("127.0.0.1", 1)
+    rcli.timeout_seconds = None
+    rcli.max_retries = 2
+    rcli.sock = socket.socket()  # dummy: is_open() true, close() is safe
+    attempts = {"n": 0}
+
+    def _delivered_then_died(req_json):
+        attempts["n"] += 1
+        rcli._inflight_sent = True  # full frame sent, transport died afterwards
+        raise ConnectionError("reset during recv")
+
+    rcli._exchange_once = _delivered_then_died
+    try:
+        rcli.send_command("ping")
+        no_retry = False
+    except ConnectionError:
+        no_retry = attempts["n"] == 1
+    c.check("no retry after a delivered frame", no_retry, f"attempts={attempts['n']}")
+
+    attempts2 = {"n": 0}
+
+    def _never_delivered(req_json):
+        attempts2["n"] += 1
+        raise ConnectionError("connect dropped before sendall")
+
+    rcli2 = ce.TCPBridgeClient("127.0.0.1", 1)
+    rcli2.timeout_seconds = None
+    rcli2.max_retries = 1
+    rcli2.sock = socket.socket()
+    rcli2.close = lambda: None  # keep the transport "alive" across attempts
+    rcli2._exchange_once = _never_delivered
+    try:
+        rcli2.send_command("ping")
+    except ConnectionError:
+        pass
+    c.check("retry still applies when frame undelivered", attempts2["n"] == 2,
+            f"attempts={attempts2['n']}")
+
+    # ------------------------------------------------ TCP socket-deadline path
+    c.section("TCP socket-deadline timeout (v15.6.1)")
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    dport = srv.getsockname()[1]
+    holder = []
+
+    def _hold():
+        conn, _addr = srv.accept()
+        holder.append(conn)  # accept, then never reply
+
+    threading.Thread(target=_hold, daemon=True).start()
+    dcli = ce.TCPBridgeClient.__new__(ce.TCPBridgeClient)
+    dcli.host, dcli.port, dcli.base_port = "127.0.0.1", dport, dport
+    dcli.timeout_seconds = 0.3
+    dcli._io_lock = threading.Lock()
+    dcli._conn_lock = threading.RLock()
+    dcli._inflight_sent = False
+    dcli.sock = socket.socket()
+    dcli.sock.connect(("127.0.0.1", dport))
+    deadline_raised = False
+    try:
+        dcli._exchange_with_timeout(b"{}", "x")
+    except TimeoutError:
+        deadline_raised = True
+    c.check("deadline raises TimeoutError and closes the socket",
+            deadline_raised and dcli.sock is None, f"sock={dcli.sock!r}")
+    for conn in holder:
+        conn.close()
+    srv.close()
+
     stub.stop()
     return c.summary()
 

@@ -1,6 +1,6 @@
 # DEV_GUIDE — cheatengine-mcp-tcp-bridge 开发者指南
 
-> 面向维护者与二次开发者。版本基线：Lua bridge **v15.6.0** / Native DLL **v3.3.4**。
+> 面向维护者与二次开发者。版本基线：Lua bridge **v15.6.1** / Native DLL **v3.3.4**。
 > 所有数字（上限、端口、超时）均为代码中的真实常量，非建议值。
 
 ---
@@ -27,7 +27,7 @@
 └──────────────┬──────────────────────────────────────────────────────┘
                │ 进程内 C 函数调用（非 socket，同属 CE 进程）
 ┌──────────────▼──────────────────────────────────────────────────────┐
-│ ce_mcp_bridge.lua v15.6.0 — 运行在 CE 主线程                          │
+│ ce_mcp_bridge.lua v15.6.1 — 运行在 CE 主线程                          │
 │  · 1ms CreateTimer 轮询 mcp_tcp_poll()，每 tick drain 一条待处理命令     │
 │  · executeCommand() → commandHandlers[method] 直查（无 MCP 握手层）    │
 │  · 194 个 cmd_* handler + 203 个注册方法名（含别名）               │
@@ -466,3 +466,57 @@ error envelope）；通过后 `params._auth = nil` 剥离——handler 与审计
   测试用函数作用域封装——主 chunk 已逼近 Lua 200 局部变量上限，`do..end` 不够、须独立 function。
 - Python：+11（243 记录数、目录全覆盖、core/minimal/未知剖面、244 注册面、list/enabled 一致性、
   enable 幂等、token 注入/未设不注入）。
+
+---
+
+## 15. 代码质量审计轮（v15.6.1）
+
+双代理并行审计（Python 3899 行 / Lua 8301 行）+ 逐条以实源复核。分桶结论：
+确证采纳 14 项、误报剔除 2 项（"分页 page 被丢弃"——实为正确使用；"Python 1047 陈旧注释"——
+实为正常文档）、记录不改动 3 项（gapHotkeys/gapCustomTypes 全局是既定的防 GC 约定；
+qword 负值合法性使 write_integer 校验的不对称成为设计；dbk_get_cr* 等**只读**方法被
+`dbk_` 前缀误入审计属安全侧过度记录，不值得为它引入第三张表）。
+
+### Lua 层（ce_mcp_bridge.lua）
+
+- **审计精确集**：新增 `AUDIT_MUTATING_EXACT`（23 个前缀漏掉的可变更方法：run_command、
+  evaluate_lua、debug_* 家族、start/stop_dbvm_watch 及 safe 别名、table_file_*、
+  auto_guess_structure、map_view_of_section、read_region_from_file、clear_all_breakpoints…）；
+  删除 3 个死前缀（`dbk_writes_` 被 `dbk_` 覆盖、`dissect_code_load/clear` 无对应方法）。
+- **令牌比较常量化**：`secureTokenEq`（按字节 XOR 累加，长度独立），防逐字节 timing 探测。
+- **钳位补齐**（全部返回 `INVALID_PARAMS`，且参数校验先于进程守卫——超限请求在未挂进程时
+  也得到可操作错误）：`read_string` max_length ≤ 1 MiB、`md5_memory` size ≤ 16 MiB
+  （对齐 AGENTS.md 既有文档声明）、`copy_memory`/`compare_memory` ≤ 64 MiB、
+  `find_function_boundaries` max_search ≤ 65536、`find_references` 反汇编循环 ≤ 4096
+  （truncated 标记）、`find_call_references` E8 遍历 ≤ 100000（truncated）、
+  `stop_dbvm_watch` 日志回放 ≤ 10000（truncated）。
+- **bug 修复**：`stop_dbvm_watch` 每条日志条目 disassemble 两次（pcall 内一次 + 直调一次）
+  → 捕获一次；`next_scan` 的 foundlist.destroy() 补 pcall（对齐 scan_all）。
+- **行为变更**：`get_process_info` 不再每次调用强制 `reinitializeSymbolhandler`（每次全量
+  重扫符号是轮询场景的性能坑），改为 `refresh_symbols=true` 显式 opt-in。
+- **去重**：4 个 MSR handler 收敛为 `makeMsrRead`/`makeMsrWrite` 双工厂；
+  `resolveBindAddr`/`resolveAuthToken` 同构 env 读取合并为 `readEnvVar`；
+  删除空 `log()` 函数与 3 处死调用。
+- **文案**：write_integer 越界报错改 "Value out of range for type"（负值同样触发，原文案误导）。
+
+### Python 层（mcp_cheatengine.py）
+
+- **不重放不变量补齐（安全）**：`send_command` 原本只豁免 TimeoutError——帧已完整送达后
+  连接断开（含 JSON 解码失败）会对 write/auto_assemble/inject 类命令重试，重放副作用。
+  现由 `_inflight_sent` 标记（`_exchange_once` sendall 成功后置位），已送达一律不重试；
+  仅 connect/sendall 失败（帧未送达）保留重试。契约测试覆盖两条路径。
+- **TCP 热路径去线程化**：`TCPBridgeClient._exchange_with_timeout` 改用 socket deadline
+  （覆盖 sendall + 两段 recv），每请求不再新建线程；基类保留 worker-thread 兜底给
+  无 socket 的 stub 传输，超时消息构造提为 `_timeout_error` 共享。真实 socket 离线测试
+  （listener 不回包 → TimeoutError + socket 关闭）覆盖该路径。
+- **死代码清除**：`self._last_error`（只写不读）、`format_result` 的 str 直通分支
+  （所有调用方均传 dict）、失效 `# noqa: F401`、陈旧启动日志 "v12/FastMCP"。
+- **健壮性**：`_register_startup_tools` 对 CE_MCP_TOOLS 非法值给出清爽 SystemExit(2)
+  而非 import 期 traceback；`_record_tool` 兼容裸 `@mcp.tool`（无括号）防呆；
+  shim 变量 `fastmcp_server` → `_server_module`（2.x 下原名是误导）。
+
+### 测试
+
+Lua 221 → **227**（+6：evaluate_lua 审计精确集、copy/compare/md5 钳位、越界文案、
+read_string 钳位路径）；Python 38 → **41**（+3：已送达不重试、未送达仍重试、socket
+deadline 超时关连接）；探针 4/0 不变。DLL 无变更（纯 Lua + Python + 测试 + 文档）。

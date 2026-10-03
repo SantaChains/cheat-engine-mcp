@@ -114,13 +114,13 @@ try:
         from mcp.server.mcpserver import MCPServer as _ServerClass  # mcp >= 2
         _MCP_SERVER_MODULE = "mcp.server.mcpserver.server"
     except ImportError:  # mcp 1.x
-        from mcp.server.fastmcp import FastMCP as _ServerClass  # noqa: F401
+        from mcp.server.fastmcp import FastMCP as _ServerClass
         _MCP_SERVER_MODULE = "mcp.server.fastmcp.server"
 
     if sys.platform == "win32":
         import importlib as _importlib
-        fastmcp_server = _importlib.import_module(_MCP_SERVER_MODULE)
-        fastmcp_server.stdio_server = _patched_stdio_server
+        _server_module = _importlib.import_module(_MCP_SERVER_MODULE)
+        _server_module.stdio_server = _patched_stdio_server
 
 except ImportError as e:
     print(f"[MCP CE] Import Error: {e}", file=sys.stderr, flush=True)
@@ -143,8 +143,6 @@ def format_result(result):
     if result is None:
         return json.dumps({"success": False, "error": "Empty result from bridge",
                            "error_code": "INTERNAL_ERROR"}, ensure_ascii=False)
-    if isinstance(result, str):
-        return result
     try:
         return json.dumps(result, indent=None, ensure_ascii=False, default=str)
     except (TypeError, ValueError) as exc:
@@ -245,7 +243,9 @@ class BaseBridgeClient:
         self.timeout_seconds = CE_MCP_TIMEOUT_SECONDS
         self._io_lock = threading.Lock()        # exactly one in-flight request
         self._conn_lock = threading.RLock()     # guards connect()/close()
-        self._last_error = None
+        #: set by the transport once a request frame was fully sent; send_command
+        #: uses it to refuse retries that could replay an already-executed command
+        self._inflight_sent = False
 
     # ---- transport hooks ---------------------------------------------------
     def connect(self) -> bool:
@@ -261,8 +261,20 @@ class BaseBridgeClient:
         raise NotImplementedError
 
     # ---- framing -----------------------------------------------------------
+    def _timeout_error(self, method, timeout):
+        """The TimeoutError raised when a request exceeds its budget."""
+        return TimeoutError(
+            f"'{method}' timed out after {timeout:g}s (raise CE_MCP_TIMEOUT for long scans). "
+            "The command may still be running inside Cheat Engine. "
+            + self._diagnose_after_timeout()
+        )
+
     def _exchange_with_timeout(self, req_json, method):
-        """Send one request and read one reply, honouring CE_MCP_TIMEOUT."""
+        """Send one request and read one reply, honouring CE_MCP_TIMEOUT.
+
+        Transports with a real socket override this to apply the deadline
+        directly (see TCPBridgeClient); the default runs the exchange on a
+        worker thread so stub transports need no socket plumbing."""
         timeout = self.timeout_seconds
         if timeout is None:
             return self._exchange_once(req_json)
@@ -283,11 +295,7 @@ class BaseBridgeClient:
             # The reply may still arrive later; a late frame would desynchronise
             # the length-prefixed stream, so the connection is not reusable.
             self.close()
-            raise TimeoutError(
-                f"'{method}' timed out after {timeout:g}s (raise CE_MCP_TIMEOUT for long scans). "
-                "The command may still be running inside Cheat Engine. "
-                + self._diagnose_after_timeout()
-            )
+            raise self._timeout_error(method, timeout)
         if "e" in box:
             raise box["e"]
         return box["r"]
@@ -362,6 +370,7 @@ class BaseBridgeClient:
                 )
 
             try:
+                self._inflight_sent = False  # set inside _exchange_once after sendall
                 with self._io_lock:
                     response = self._exchange_with_timeout(req_json, method)
                 return self._unwrap(response, method)
@@ -374,7 +383,13 @@ class BaseBridgeClient:
                 last_error = exc
                 with self._conn_lock:
                     self.close()
-                if attempt < attempts:
+                # Same invariant as timeouts: once the full frame reached the
+                # bridge (_inflight_sent), the command may have executed and a
+                # retry would replay the side effect. Retrying is only safe
+                # when the frame was never fully delivered (connect/sendall
+                # failure), which also covers the initial connect() above.
+                may_have_executed = getattr(self, "_inflight_sent", False)
+                if attempt < attempts and not may_have_executed:
                     time.sleep(CE_RETRY_DELAY)
                     continue
 
@@ -562,9 +577,27 @@ class TCPBridgeClient(BaseBridgeClient):
             self.sock = None
 
     # ---- I/O ---------------------------------------------------------------
+    def _exchange_with_timeout(self, req_json, method):
+        """Socket-deadline fast path: no worker thread per request.
+
+        The deadline covers sendall and both recv phases. On timeout the
+        connection is closed — a late frame would desynchronise the
+        length-prefixed stream."""
+        timeout = self.timeout_seconds
+        sock = self.sock
+        if sock is None:
+            raise ConnectionError("Not connected")
+        try:
+            sock.settimeout(timeout)
+            return self._exchange_once(req_json)
+        except _socket.timeout:
+            self.close()
+            raise self._timeout_error(method, timeout)
+
     def _exchange_once(self, req_json: bytes) -> dict:
         payload = struct.pack('<I', len(req_json)) + req_json
         self.sock.sendall(payload)
+        self._inflight_sent = True
 
         resp_len = struct.unpack('<I', self._recv_from(self.sock, 4))[0]
         if resp_len > MAX_RESPONSE_SIZE_BYTES:
@@ -654,11 +687,15 @@ _TOOL_SPECS = []  # function objects in definition order; FastMCP derives the
 
 
 def _record_tool(*_args, **_kwargs):
-    """Drop-in stand-in for FastMCP.tool() during the module body: record the
+    """Drop-in stand-in for the SDK's tool() during the module body: record the
     function for selective registration instead of registering immediately."""
     def decorator(fn):
         _TOOL_SPECS.append(fn)
         return fn
+    # Guard against a bare @mcp.tool (no parentheses): the SDK would receive
+    # the function directly here too.
+    if len(_args) == 1 and callable(_args[0]) and not _kwargs:
+        return decorator(_args[0])
     return decorator
 
 
@@ -3871,7 +3908,12 @@ def _register_startup_tools():
         debug_log(f"WARNING: tools missing from _TOOL_CATEGORIES, registering "
                   f"them anyway: {', '.join(uncategorized)}")
     raw = os.environ.get("CE_MCP_TOOLS", "all")
-    cats = _resolve_profile(raw)  # ValueError here is a hard config error
+    try:
+        cats = _resolve_profile(raw)
+    except ValueError as exc:
+        # Fail fast with an actionable message instead of an import traceback.
+        debug_log(f"FATAL: {exc}")
+        raise SystemExit(2) from exc
     added, _, _ = _enable_categories(cats, notify=False)
     if uncategorized:  # never let a catalog miss hide tools from the agent
         for fn in _TOOL_SPECS:
@@ -3892,7 +3934,7 @@ _register_startup_tools()
 
 if __name__ == "__main__":
     try:
-        debug_log("Starting FastMCP server (v12/v99 compatible)...")
+        debug_log(f"Starting MCP server ({_MCP_SERVER_MODULE}; bridge protocol v99)...")
         mcp.run()
     except Exception as e:
         debug_log(f"Fatal Crash: {e}")

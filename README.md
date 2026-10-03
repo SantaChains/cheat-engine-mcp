@@ -2,7 +2,7 @@
 
 # Cheat Engine MCP Bridge — Native TCP Edition
 
-[![Version](https://img.shields.io/badge/version-15.6.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-Native%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/tools-244-brightgreen.svg)](#available-tools)
+[![Version](https://img.shields.io/badge/version-15.6.1-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-Native%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/tools-244-brightgreen.svg)](#available-tools)
 
 Let your AI assistant (Claude, Cursor, Codex, any MCP client) drive **Cheat Engine** directly:
 read and write process memory, scan for values, disassemble functions, set breakpoints,
@@ -103,7 +103,7 @@ Expected output:
 ```
 [MCP] CE x64 - loading ce_mcp_tcp_x64.dll
 [MCP] DLL loaded OK from: C:\Program Files\Cheat Engine\plugins\ce_mcp_tcp_x64.dll
-[MCP] Bridge v15.6.0 started on 127.0.0.1:17171 (native TCP, 1ms poll)
+[MCP] Bridge v15.6.1 started on 127.0.0.1:17171 (native TCP, 1ms poll)
 ```
 
 No window will pop up — the DLL debug console is hidden by default (`CE_MCP_DEBUG_CONSOLE=1` shows it without stealing focus).
@@ -225,7 +225,7 @@ By default the DLL binds to `127.0.0.1` only. For remote access set `CE_MCP_BIND
 Ask the AI: *"Ping Cheat Engine"*
 
 ```json
-{"success": true, "version": "15.6.0", "message": "CE MCP Bridge v15.6.0 alive"}
+{"success": true, "version": "15.6.1", "message": "CE MCP Bridge v15.6.1 alive"}
 ```
 
 ---
@@ -247,9 +247,11 @@ Ask the AI: *"Ping Cheat Engine"*
 | `CE_MCP_TOOLS` | `all` | **Tool loading profile**: `all` / `core` (alias `minimal`) / `core,memory,debug,...` — see [Progressive Tool Loading](#progressive-tool-loading) |
 | `CE_MCP_AUTH_TOKEN` | *(unset)* | Shared token auth: set on both sides so every request carries `params._auth` and the bridge rejects the rest with `AUTH_REQUIRED` |
 
-> A timed-out command is **never** retried: it may already have executed inside CE
-> (`write_memory`, `auto_assemble`, `inject_dll`, `execute_code`), so replaying it would apply the
-> side effect twice. A timeout closes the socket instead.
+> A command that **may already have executed** is **never** retried. That covers a timed-out
+> command and any failure after the request frame was fully delivered — `write_memory`,
+> `auto_assemble`, `inject_dll` or `execute_code` may have run, and replaying would apply the
+> side effect twice. Only failures where the frame was never delivered (connect / send failure)
+> are retried. A timeout closes the socket instead.
 
 ---
 
