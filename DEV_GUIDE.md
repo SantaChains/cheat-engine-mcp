@@ -1,6 +1,6 @@
 # DEV_GUIDE — cheatengine-mcp-tcp-bridge 开发者指南
 
-> 面向维护者与二次开发者。版本基线：Lua bridge **v15.8.0** / Native DLL **v3.3.5**。
+> 面向维护者与二次开发者。版本基线：Lua bridge **v15.8.0** / Native DLL **v3.3.6**。
 > 所有数字（上限、端口、超时）均为代码中的真实常量，非建议值。
 
 ---
@@ -625,3 +625,45 @@ AOB 队列 mock hit+miss+ratio、模块解析失败/显式模块命中、inject 
 指纹命中/失配/不可读）、Python **45/0**（计数断言 245→248、246→249，新工具
 注册断言）、mypy **0 errors**、luac OK。
 工具面：**248 记录 + ce_tools_manage = 249 注册 / Lua 调度 253**。
+
+## 18. DLL/C 源码审核轮（v3.3.6）
+
+对 `NativeBridge/ce_mcp_tcp.c`（1293 行）全量审核，逐条以代码为准：
+
+**P1 内存安全（已修复）**
+- `json_escape` 控制字符转义路径：`\u%04x` 一次写 6 字节，但循环头只按
+  `i < outLen-2` 防护，`i` 可越过 outLen，函数尾 `out[i]='\0'` 越界写最多
+  4 字节。可达载体：`g_last_method`（任意帧 method 字段，服务线程栈
+  escMethod[192]）、窗口 class/title（escCls[192]/escTitle[768]）——31 个
+  控制字符即可在 128→192 边界 OOB 1 字节。修复：每个发射分支自带
+  最坏足迹检查（quote 路径 ≥3、控制路径 ≥7），越界前 break。
+
+**P2 加固（已修复）**
+- DllMain 注释声称"惰性控制台初始化发生在 luaopen"，但 attach 段的
+  `dbg_log("[MCP-DLL] ce_mcp_tcp.dll loaded")` 恰恰在 loader lock 下触发
+  AllocConsole——注释与代码直接矛盾（实践中未死锁属侥幸）。修复：
+  DllMain 完全静默，首条日志移到 luaopen（loader lock 已释放）。
+- `dbg_log` 用 vsnprintf 返回值直接索引 `buf[n]`：C99 返回"应有长度"，
+  截断时 n 可达 2046+ → 潜伏越界写。修复：先钳位再写。
+- 帧长组装 `hdr[3]<<24` 在 int 上移位，长度字节 ≥0x80 时是有符号溢出 UB。
+  修复：无符号组装后再转 int。
+- `tcp_send_frame` 无发送超时：恶意本地客户端连上后不读，服务线程可在
+  send(4MiB 响应) 上永久阻塞，桥整体头阻塞。修复：SO_SNDTIMEO 30s。
+- `enumerate_dialogs` 尾部 `"]"` 追加在 buf 恰好填满时无 NUL 终止
+  （MSVC _snprintf 截断不终止）→ 下游 strlen 越界读。修复：显式补终止符。
+- `luaopen` 返回的 version 硬编码 "3.3.5" 与 DLL_VERSION 宏重复
+  （差一点造成版本不一致）。修复：改用宏。
+
+**P3 清理（已修复）**
+- 头部注释描述的 "File IPC mode (fallback)" 代码中早已不存在 → 删除陈旧段落。
+- `pL_pcallk` / `pL_error` 解析绑定但从未调用 → 从绑定表移除（同时缩小
+  部分匹配集合，与核心集判断一致）。
+
+**保留不动（记录）**：bytes 计数器为有符号 32 位，累计 >2GiB 后 JSON 显示
+负数（外观问题，改 64 位需动 JSON 输出，收益低）；`_snprintf` 截断不终止
+属 MSVC 语义，已逐调用点核对缓冲算术安全。
+
+**产物**：DLL v3.3.6 双架构 MSVC /MT 重建部署（x64 173,056 B
+md5 13e938dd…；x86 145,920 B md5 0c5501b5…；PE 机器类型 0x8664/0x14c、
+版本串 3.3.6 ×3、无 3.3.5 残留）。真机连通性验证仍待用户侧复制 DLL +
+重载桥脚本后进行。

@@ -1,12 +1,10 @@
 /*
  * ce_mcp_tcp.dll - Native TCP Bridge for Cheat Engine MCP
  *
- * Two operating modes:
- *   1. Native Lua API mode: resolves lua_pushstring etc. and registers global
- *      functions (mcp_tcp_start/stop/poll/respond/status).
- *   2. File IPC mode (fallback): when Lua API cannot be resolved, the DLL
- *      starts TCP itself and exchanges commands/responses via temp files.
- *      Lua polls %TEMP%\ce_mcp\cmd.txt and writes resp.txt.
+ * Single operating mode: Native Lua API. The DLL resolves lua_pushstring
+ * etc. from the host process and registers global functions
+ * (mcp_tcp_start/stop/poll/respond/status). If the Lua API cannot be
+ * resolved, luaopen fails and the Lua-only fallback bridge is used instead.
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -55,6 +53,9 @@ static void dbg_log(const char *fmt, ...) {
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof(buf) - 2, fmt, ap);
     va_end(ap);
+    /* v3.3.6: C99 vsnprintf returns the WOULD-BE length on truncation; the
+     * old code indexed buf[n] with it unchecked. Clamp before writing. */
+    if (n > (int)sizeof(buf) - 2) n = (int)sizeof(buf) - 2;
     if (n > 0) {
         buf[n] = '\n';
         buf[n + 1] = '\0';
@@ -84,8 +85,6 @@ static int         (*pL_isnumber)(lua_State*, int);
 static void        (*pL_createtable)(lua_State*, int, int);
 static void        (*pL_setfield)(lua_State*, int, const char*);
 static int         (*pL_getglobal)(lua_State*, const char*);
-static int         (*pL_pcallk)(lua_State*, int, int, int, long long, void*);
-static int         (*pL_error)(lua_State*);
 
 static int lua_api_ready = 0;
 
@@ -126,8 +125,6 @@ static int resolve_lua_api(void) {
         { "lua_createtable", (void**)&pL_createtable  },
         { "lua_setfield",    (void**)&pL_setfield     },
         { "lua_getglobal",   (void**)&pL_getglobal    },
-        { "lua_pcallk",      (void**)&pL_pcallk       },
-        { "lua_error",       (void**)&pL_error        },
     };
     int total = sizeof(entries) / sizeof(entries[0]);
     int best_count = 0;
@@ -359,7 +356,7 @@ static const char* extract_json_method(const char *json, char *out, int outLen) 
  * dialog OR running a long command; dll_enum_dialogs disambiguates the two.
  */
 
-#define DLL_VERSION   "3.3.5"
+#define DLL_VERSION   "3.3.6"
 #define LUA_RESPONSIVE_THRESHOLD_MS 5000
 #define MAX_DIALOGS   64
 
@@ -492,14 +489,23 @@ static void json_extract_id(const char *json, char *out, int outLen) {
     }
 }
 
-/* Escape a UTF-8 string for embedding in JSON (quotes, backslash, controls). */
+/* Escape a UTF-8 string for embedding in JSON (quotes, backslash, controls).
+ * v3.3.6 fix: the control-char path emits 6 bytes via _snprintf, which the
+ * old loop header (i < outLen - 2) did not account for -- a string with
+ * enough control chars let "i" overshoot outLen and the final out[i]='\0'
+ * wrote past the buffer (reachable through g_last_method / window class /
+ * title, e.g. 31 control chars for a 128->192 byte escape buffer). Every
+ * emitting branch now checks its own worst-case footprint first. */
 static void json_escape(const char *in, char *out, int outLen) {
     int i = 0;
+    if (outLen <= 2) { if (outLen > 0) out[0] = '\0'; return; }
     while (*in && i < outLen - 2) {
         unsigned char c = (unsigned char)*in;
         if (c == '"' || c == '\\') {
+            if (outLen - i < 3) break;
             out[i++] = '\\'; out[i++] = (char)c; in++;
         } else if (c < 0x20) {
+            if (outLen - i < 7) break;   /* "\u00xx" = 6 chars + terminator */
             i += _snprintf(out + i, outLen - i, "\\u%04x", c);
             in++;
         } else {
@@ -563,7 +569,13 @@ static void enumerate_dialogs(DialogList *dl) {
     dl->buf[0] = '[';
     EnumWindows(enum_dialog_proc, (LPARAM)dl);
     size_t len = strlen(dl->buf);
-    _snprintf(dl->buf + len, sizeof(dl->buf) - len, "]");
+    if (len < sizeof(dl->buf)) {
+        _snprintf(dl->buf + len, sizeof(dl->buf) - len, "]");
+        /* v3.3.6: _snprintf does not NUL-terminate on truncation; if the
+         * dialog array filled the buffer exactly the closing bracket could
+         * end up unterminated and strlen() downstream would run past it. */
+        dl->buf[sizeof(dl->buf) - 1] = '\0';
+    }
 }
 
 /* Refuse to close windows that would kill or lobotomize CE itself. */
@@ -841,8 +853,13 @@ static int tcp_recv_exact(SOCKET s, char *buf, int len, int timeout_ms) {
 static char* tcp_recv_frame(SOCKET s, int *out_len) {
     unsigned char hdr[4];
     if (tcp_recv_exact(s, (char*)hdr, 4, 600000) != 4) return NULL;
-    int len = hdr[0] | (hdr[1] << 8) | (hdr[2] << 16) | (hdr[3] << 24);
-    if (len <= 0 || len > MAX_CMD_SIZE) return NULL;
+    /* v3.3.6: assemble unsigned -- "hdr[3] << 24" on a signed int is
+     * undefined behaviour for length bytes >= 0x80 and previously relied on
+     * wraparound to land in the len <= 0 reject path. */
+    unsigned int ulen = (unsigned int)hdr[0] | ((unsigned int)hdr[1] << 8) |
+                        ((unsigned int)hdr[2] << 16) | ((unsigned int)hdr[3] << 24);
+    if (ulen == 0 || ulen > MAX_CMD_SIZE) return NULL;
+    int len = (int)ulen;
     char *buf = (char*)malloc(len + 1);
     if (!buf) return NULL;
     if (tcp_recv_exact(s, buf, len, 600000) != len) { free(buf); return NULL; }
@@ -916,6 +933,13 @@ static DWORD WINAPI tcp_server_thread(LPVOID param) {
         int one = 1;
         setsockopt(cs, IPPROTO_TCP, TCP_NODELAY, (char*)&one, sizeof(one));
         setsockopt(cs, SOL_SOCKET, SO_KEEPALIVE, (char*)&one, sizeof(one));
+        /* v3.3.6: bound sends as well. Without SO_SNDTIMEO a local client
+         * that connects, issues a command and never reads could park the
+         * server thread inside send() forever (a 4 MiB response does not
+         * drain into a full receive window), head-of-line blocking every
+         * future connection. 30 s is generous even for the largest frame. */
+        DWORD sndTimeoutMs = 30000;
+        setsockopt(cs, SOL_SOCKET, SO_SNDTIMEO, (char*)&sndTimeoutMs, sizeof(sndTimeoutMs));
 
         br->client_sock = cs;
         br->connected = 1;
@@ -1261,7 +1285,7 @@ __declspec(dllexport) int luaopen_ce_mcp_tcp(lua_State *L) {
     dbg_log("[MCP-DLL] Native mode: 5 Lua functions registered (dll_* fastpath enabled)");
 
     lua_newtable(L);
-    lua_setstrfield(L, -1, "version", "3.3.5");
+    lua_setstrfield(L, -1, "version", DLL_VERSION);
     lua_setstrfield(L, -1, "transport", "native_tcp");
     return 1;
 }
@@ -1270,16 +1294,17 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     (void)hModule; (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         g_self_module = hModule;
-        /* dbg_init() is deliberately NOT called here: DllMain runs under the
-         * loader lock, and AllocConsole is exactly the kind of call the
-         * Dynamic-Link Library Best Practices document tells you to defer.
-         * dbg_log() lazy-initializes the console on first use, which happens
-         * inside luaopen_ce_mcp_tcp -- after LoadLibrary has released the
-         * loader lock. */
-        dbg_log("[MCP-DLL] ce_mcp_tcp.dll loaded (v3.3.5)");
+        /* v3.3.6: deliberately NO dbg_log() here. dbg_log lazy-initializes
+         * the console, so the old attach-time log line meant AllocConsole
+         * actually DID run under the loader lock -- exactly what the
+         * Dynamic-Link Library Best Practices document says to defer, and
+         * a direct contradiction of the comment that used to sit below it.
+         * The first log line now comes from luaopen_ce_mcp_tcp, which runs
+         * after LoadLibrary has released the loader lock. */
     }
     if (reason == DLL_PROCESS_DETACH) {
-        dbg_log("[MCP-DLL] DLL unloading...");
+        /* No logging here either: creating a console during teardown under
+         * the loader lock is worse than not logging at all. */
         if (g_bridge.running) {
             g_bridge.running = 0;
             if (g_bridge.client_sock != INVALID_SOCKET) closesocket(g_bridge.client_sock);
