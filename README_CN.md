@@ -2,7 +2,7 @@
 
 # Cheat Engine MCP Bridge — 原生 TCP 版
 
-[![Version](https://img.shields.io/badge/version-15.6.1-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-原生%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/工具-244-brightgreen.svg)](#可用工具)
+[![Version](https://img.shields.io/badge/version-15.7.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-原生%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/工具-246-brightgreen.svg)](#可用工具)
 
 让你的 AI 助手（Claude、Cursor、Codex、任何 MCP 客户端）直接驱动 **Cheat Engine**：
 读写进程内存、扫描数值、反汇编函数、下断点、注入代码、操作 CT 表——**198 个 MCP 工具**，
@@ -99,7 +99,7 @@ dofile([[C:\path\to\MCP_Server\ce_mcp_bridge.lua]])
 ```
 [MCP] CE x64 - loading ce_mcp_tcp_x64.dll
 [MCP] DLL loaded OK from: C:\Program Files\Cheat Engine\plugins\ce_mcp_tcp_x64.dll
-[MCP] Bridge v15.6.1 started on 127.0.0.1:17171 (native TCP, 1ms poll)
+[MCP] Bridge v15.7.0 started on 127.0.0.1:17171 (native TCP, 1ms poll)
 ```
 
 不会弹出任何窗口——DLL 调试控制台默认隐藏（`CE_MCP_DEBUG_CONSOLE=1` 可显示，且不抢焦点）。
@@ -217,7 +217,7 @@ DLL 默认只绑定 `127.0.0.1`。远程访问需在 CE 机器启动前设置环
 问 AI：*"Ping 一下 Cheat Engine"*
 
 ```json
-{"success": true, "version": "15.6.1", "message": "CE MCP Bridge v15.6.1 alive"}
+{"success": true, "version": "15.7.0", "message": "CE MCP Bridge v15.7.0 alive"}
 ```
 
 ---
@@ -247,7 +247,7 @@ DLL 默认只绑定 `127.0.0.1`。远程访问需在 CE 机器启动前设置环
 
 ## 分层渐进式工具加载
 
-244 个工具连同完整 JSON Schema 放进一次 `tools/list`，每次会话启动都会消耗客户端大量上下文。
+246 个工具连同完整 JSON Schema 放进一次 `tools/list`，每次会话启动都会消耗客户端大量上下文。
 服务端因此按**层**加载工具：
 
 - `CE_MCP_TOOLS=all` *（默认）*——全量注册，与旧版行为一致。
@@ -270,23 +270,23 @@ DLL 默认只绑定 `127.0.0.1`。远程访问需在 CE 机器启动前设置环
 
 ---
 
-## 可用工具（244 个注册工具 / 248 个调度方法）
+## 可用工具（246 个注册工具 / 250 个调度方法）
 
-Python 侧记录 **243** 个 `@mcp.tool()` 函数，外加 `ce_tools_manage` 元工具
-（默认共 **244** 个注册）；Lua 调度器解析 **248** 个方法
+Python 侧记录 **245** 个 `@mcp.tool()` 函数，外加 `ce_tools_manage` 元工具
+（默认共 **246** 个注册）；Lua 调度器解析 **250** 个方法
 （差值是别名，如 `read_bytes` → `read_memory`、`status` → `bridge_status`）。
 
 | 类别 | 数量 | 示例 |
 |------|------|------|
 | **core**（常驻） | 15 | `bridge_status`, `ping`, `evaluate_lua`, `batch_call`, `dialog_enum`, `ce_tools_manage` |
-| **memory** | 20 | `read_memory`, `write_memory`, `read_pointer_chain`, `allocate_memory`, `set_memory_protection` |
+| **memory** | 21 | `read_memory`, `write_memory`, `read_pointer_chain`, `validate_pointer_chain`, `allocate_memory` |
 | **scan** | 21 | `scan_all`, `aob_scan`, `aob_scan_unique`, `pointer_rescan`, `persistent_scan_*`, `generate_signature` |
 | **disasm** | 9 | `disassemble`, `analyze_function`, `find_references`, `get_previous_opcode` |
 | **debug** | 22 | `set_breakpoint`, `debug_get_context`, `debug_continue`, `start_dbvm_watch` |
 | **process** | 16 | `get_process_list`, `pause_process`, `set_speed`, `queue_to_main_thread` |
 | **symbols** | 14 | `get_symbol_address`, `get_symbol_info`, `register_symbol`, `reinitialize_symbol_handler` |
 | **structures** | 8 | `create_structure`, `dissect_structure`, `auto_guess_structure`, `export_structure_to_xml` |
-| **table** | 23 | `load_table`, `save_table`, `create_memory_record`, `set_memory_record_active`, `table_file_*` |
+| **table** | 24 | `load_table`, `save_table`, `create_memory_record`, `ct_memory_records_health`, `table_file_*` |
 | **aa** | 8 | `auto_assemble`, `compile_c_code`, `generate_code_injection_script`, `register_aa_command` |
 | **exec** | 8 | `execute_code`, `execute_code_ex`, `inject_dll`, `inject_dotnet_dll` |
 | **dotnet** | 8 | `dotnet_status`, `dotnet_enum_types`, `dotnet_type_details`, `dotnet_enum_objects` |

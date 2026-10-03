@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sys
 import os
 
@@ -18,7 +20,7 @@ if sys.platform == "win32":
     # translate LF -> CRLF. Guarded: when the server is imported for tooling
     # (or launched with redirected/closed stdio) these handles may not exist,
     # and an unguarded setmode() would abort the process at import time.
-    def _force_binary(stream):
+    def _force_binary(stream: object) -> None:
         try:
             if stream is not None and hasattr(stream, "fileno"):
                 msvcrt.setmode(stream.fileno(), os.O_BINARY)
@@ -48,15 +50,15 @@ if sys.platform == "win32":
             # Use newline='\n' to prevent CRLF translation on Windows
             stdout = anyio.wrap_file(TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline='\n'))
 
-        read_stream_writer, read_stream = anyio.create_memory_object_stream(0)
-        write_stream, write_stream_reader = anyio.create_memory_object_stream(0)
+        read_stream_writer, read_stream = anyio.create_memory_object_stream(0)  # type: ignore[var-annotated]
+        write_stream, write_stream_reader = anyio.create_memory_object_stream(0)  # type: ignore[var-annotated]
 
         async def stdin_reader():
             try:
                 async with read_stream_writer:
                     async for line in stdin:
                         try:
-                            message = types.JSONRPCMessage.model_validate_json(line)
+                            message = types.JSONRPCMessage.model_validate_json(line)  # type: ignore[attr-defined]
                         except Exception as exc:
                             await read_stream_writer.send(exc)
                             continue
@@ -81,7 +83,7 @@ if sys.platform == "win32":
             yield read_stream, write_stream
     
     # Apply the monkey-patch
-    mcp_stdio.stdio_server = _patched_stdio_server
+    mcp_stdio.stdio_server = _patched_stdio_server  # type: ignore[attr-defined]
 
 # ============================================================================
 # STDOUT PROTECTION FOR MCP
@@ -97,6 +99,8 @@ sys.stdout = sys.stderr
 # Now safe to import libraries that might print during import
 import json
 import struct
+from collections.abc import Callable
+from typing import Any, Final
 import time
 import math
 import itertools
@@ -111,16 +115,16 @@ try:
     # both import stdio_server into their server module namespace, so the
     # Windows CRLF patch below can be applied to whichever one is present.
     try:
-        from mcp.server.mcpserver import MCPServer as _ServerClass  # mcp >= 2
+        from mcp.server.mcpserver import MCPServer as _ServerClass  # type: ignore[no-redef]  # mcp >= 2
         _MCP_SERVER_MODULE = "mcp.server.mcpserver.server"
     except ImportError:  # mcp 1.x
-        from mcp.server.fastmcp import FastMCP as _ServerClass
+        from mcp.server.fastmcp import FastMCP as _ServerClass  # type: ignore[attr-defined,no-redef]
         _MCP_SERVER_MODULE = "mcp.server.fastmcp.server"
 
     if sys.platform == "win32":
         import importlib as _importlib
         _server_module = _importlib.import_module(_MCP_SERVER_MODULE)
-        _server_module.stdio_server = _patched_stdio_server
+        _server_module.stdio_server = _patched_stdio_server  # type: ignore[attr-defined]
 
 except ImportError as e:
     print(f"[MCP CE] Import Error: {e}", file=sys.stderr, flush=True)
@@ -130,11 +134,11 @@ except ImportError as e:
 sys.stdout = _mcp_stdout
 
 # Debug helper - always goes to stderr, never corrupts MCP
-def debug_log(msg):
+def debug_log(msg: str) -> None:
     print(f"[MCP CE] {msg}", file=sys.stderr, flush=True)
 
 # Helper to format results as proper JSON strings for MCP tools
-def format_result(result):
+def format_result(result: Any) -> str:
     """Format a CE Bridge result as a JSON string for AI consumption.
 
     Never raises: an unexpected payload type is reported as an error object so
@@ -153,18 +157,22 @@ def format_result(result):
 # CONFIGURATION
 # ============================================================================
 
-MCP_SERVER_NAME = "cheatengine"
+# Structured bridge results are plain JSON dictionaries end to end; giving the
+# shape a name keeps the transport layer honest without a heavy schema.
+JsonDict = dict[str, Any]
+
+MCP_SERVER_NAME: Final = "cheatengine"
 
 # The native DLL frames with a 32-bit length prefix and refuses to read a
 # command larger than MAX_CMD_SIZE (4 MiB). Guarding here turns "the bridge
 # silently dropped the connection" into an actionable message.
-MAX_RESPONSE_SIZE_BYTES = 32 * 1024 * 1024
-MAX_REQUEST_SIZE_BYTES = 4 * 1024 * 1024
+MAX_RESPONSE_SIZE_BYTES: Final = 32 * 1024 * 1024
+MAX_REQUEST_SIZE_BYTES: Final = 4 * 1024 * 1024
 
 # Host/endpoint configuration. TCP is the only transport: the Lua bridge has
 # shipped a native TCP server (4-byte LE length prefix + JSON-RPC) since v15.
-CE_HOST = os.environ.get("CE_HOST", "127.0.0.1")
-CE_PORT = int(os.environ.get("CE_PORT", "17171"))
+CE_HOST: Final = os.environ.get("CE_HOST", "127.0.0.1")
+CE_PORT: Final = int(os.environ.get("CE_PORT", "17171"))
 
 # Optional shared-token authentication (design borrowed from
 # tonytranrp/cheat-engine-mcp, implemented at the Lua dispatch layer — no DLL
@@ -172,7 +180,7 @@ CE_PORT = int(os.environ.get("CE_PORT", "17171"))
 # every request carries params._auth and the Lua bridge rejects anything else
 # with AUTH_REQUIRED before the handler runs. Unset on both sides = open
 # loopback access (the default).
-CE_AUTH_TOKEN = os.environ.get("CE_MCP_AUTH_TOKEN") or None
+CE_AUTH_TOKEN: Final = os.environ.get("CE_MCP_AUTH_TOKEN") or None
 
 # How many extra attempts after the first failure. Only ever applied to
 # *connection* failures — never to timeouts (see send_command).
@@ -184,7 +192,7 @@ CE_PROBE_TIMEOUT = float(os.environ.get("CE_MCP_PROBE_TIMEOUT", "3.0"))
 CE_RETRY_DELAY = float(os.environ.get("CE_MCP_RETRY_DELAY", "0.3"))
 
 
-def _parse_timeout_seconds(raw_value):
+def _parse_timeout_seconds(raw_value: str | None) -> float | None:
     """Parse CE_MCP_TIMEOUT seconds; <=0 disables timeout."""
     if raw_value is None:
         return 90.0
@@ -210,7 +218,7 @@ _REQUEST_COUNTER = itertools.count(1)
 # ERROR HELPERS
 # ============================================================================
 
-def error_payload(exc, method=None):
+def error_payload(exc: BaseException, method: str | None = None) -> dict[str, Any]:
     """Convert any exception into the bridge's documented error shape."""
     if isinstance(exc, TimeoutError):
         code = "TIMEOUT"
@@ -237,21 +245,21 @@ class BaseBridgeClient:
     """
 
     #: extra attempts after the first failure (connection errors only)
-    max_retries = CE_MAX_RETRIES
+    max_retries: int = CE_MAX_RETRIES
 
-    def __init__(self):
-        self.timeout_seconds = CE_MCP_TIMEOUT_SECONDS
-        self._io_lock = threading.Lock()        # exactly one in-flight request
-        self._conn_lock = threading.RLock()     # guards connect()/close()
+    def __init__(self) -> None:
+        self.timeout_seconds: float | None = CE_MCP_TIMEOUT_SECONDS
+        self._io_lock: threading.Lock = threading.Lock()   # exactly one in-flight request
+        self._conn_lock: threading.RLock = threading.RLock()  # guards connect()/close()
         #: set by the transport once a request frame was fully sent; send_command
         #: uses it to refuse retries that could replay an already-executed command
-        self._inflight_sent = False
+        self._inflight_sent: bool = False
 
     # ---- transport hooks ---------------------------------------------------
     def connect(self) -> bool:
         raise NotImplementedError
 
-    def close(self):
+    def close(self) -> None:
         raise NotImplementedError
 
     def is_open(self) -> bool:
@@ -261,7 +269,7 @@ class BaseBridgeClient:
         raise NotImplementedError
 
     # ---- framing -----------------------------------------------------------
-    def _timeout_error(self, method, timeout):
+    def _timeout_error(self, method: str, timeout: float) -> TimeoutError:
         """The TimeoutError raised when a request exceeds its budget."""
         return TimeoutError(
             f"'{method}' timed out after {timeout:g}s (raise CE_MCP_TIMEOUT for long scans). "
@@ -269,7 +277,7 @@ class BaseBridgeClient:
             + self._diagnose_after_timeout()
         )
 
-    def _exchange_with_timeout(self, req_json, method):
+    def _exchange_with_timeout(self, req_json: bytes, method: str) -> dict[str, Any]:
         """Send one request and read one reply, honouring CE_MCP_TIMEOUT.
 
         Transports with a real socket override this to apply the deadline
@@ -279,7 +287,7 @@ class BaseBridgeClient:
         if timeout is None:
             return self._exchange_once(req_json)
 
-        box = {}
+        box: dict[str, Any] = {}
 
         def _worker():
             try:
@@ -301,7 +309,7 @@ class BaseBridgeClient:
         return box["r"]
 
     @staticmethod
-    def _unwrap(response, method):
+    def _unwrap(response: Any, method: str) -> dict[str, Any]:
         """Turn a JSON-RPC envelope into the bridge's flat result dict."""
         if not isinstance(response, dict):
             return {"success": False, "method": method, "error_code": "INTERNAL_ERROR",
@@ -327,7 +335,7 @@ class BaseBridgeClient:
                 "error": f"Unexpected result payload: {type(result).__name__}"}
 
     # ---- request path ------------------------------------------------------
-    def _build_request(self, method, params):
+    def _build_request(self, method: str, params: dict[str, Any] | None) -> bytes:
         params = dict(params or {})
         if CE_AUTH_TOKEN is not None:
             params.setdefault("_auth", CE_AUTH_TOKEN)
@@ -344,10 +352,11 @@ class BaseBridgeClient:
         # non-ASCII file paths, speak_text etc. all failed.
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
-    def send_command(self, method, params=None, retries=None):
+    def send_command(self, method: str, params: dict[str, Any] | None = None,
+                     retries: int | None = None) -> dict[str, Any]:
         """Raises on failure. Tool bodies should call call() instead."""
         attempts = self.max_retries if retries is None else max(0, int(retries))
-        last_error = None
+        last_error: Exception = ConnectionError("unknown communication error")
 
         for attempt in range(attempts + 1):
             with self._conn_lock:
@@ -408,7 +417,7 @@ class BaseBridgeClient:
 # TCP CLIENT (default — local and remote, stdlib only)
 # ============================================================================
 
-CE_PORT_SCAN_RANGE = int(os.environ.get("CE_PORT_RANGE", "10"))
+CE_PORT_SCAN_RANGE: Final = int(os.environ.get("CE_PORT_RANGE", "10"))
 
 
 class TCPBridgeClient(BaseBridgeClient):
@@ -419,12 +428,12 @@ class TCPBridgeClient(BaseBridgeClient):
     service squatting on the port is not mistaken for a bridge.
     """
 
-    def __init__(self, host=CE_HOST, port=CE_PORT):
+    def __init__(self, host: str = CE_HOST, port: int = CE_PORT) -> None:
         super().__init__()
-        self.host = host
-        self.base_port = port
-        self.port = port
-        self.sock = None
+        self.host: str = host
+        self.base_port: int = port
+        self.port: int = port
+        self.sock: _socket.socket | None = None
 
     def describe_endpoint(self) -> str:
         return f"{self.host}:{self.port}"
@@ -441,8 +450,11 @@ class TCPBridgeClient(BaseBridgeClient):
             sock.settimeout(1.5)
             sock.connect((self.host, self.port))
             sock.settimeout(2.0)
+            diag_params: dict = {}
+            if CE_AUTH_TOKEN is not None:
+                diag_params["_auth"] = CE_AUTH_TOKEN
             ping = json.dumps({"jsonrpc": "2.0", "method": "ping",
-                               "params": {}, "id": 0},
+                               "params": diag_params, "id": 0},
                               ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             sock.sendall(struct.pack("<I", len(ping)) + ping)
             hdr = self._recv_from(sock, 4)
@@ -477,7 +489,7 @@ class TCPBridgeClient(BaseBridgeClient):
         return self.sock is not None
 
     # ---- connection --------------------------------------------------------
-    def _try_connect(self, port):
+    def _try_connect(self, port: int) -> _socket.socket | None:
         """Open a TCP connection to one port. Returns a socket or None."""
         sock = None
         try:
@@ -496,11 +508,17 @@ class TCPBridgeClient(BaseBridgeClient):
                     pass
             return None
 
-    def _is_ce_bridge(self, sock):
+    def _is_ce_bridge(self, sock: _socket.socket) -> bool:
         """Send a ping to confirm the peer really is a CE MCP bridge."""
         try:
+            ping_params: dict = {}
+            if CE_AUTH_TOKEN is not None:
+                # The Lua dispatcher and the DLL fast path both reject
+                # unauthenticated requests when a token is configured; the
+                # probe must authenticate too or connect() can never succeed.
+                ping_params["_auth"] = CE_AUTH_TOKEN
             ping_req = json.dumps(
-                {"jsonrpc": "2.0", "method": "ping", "params": {}, "id": 0},
+                {"jsonrpc": "2.0", "method": "ping", "params": ping_params, "id": 0},
                 ensure_ascii=False, separators=(",", ":"),
             ).encode("utf-8")
             payload = struct.pack('<I', len(ping_req)) + ping_req
@@ -519,7 +537,7 @@ class TCPBridgeClient(BaseBridgeClient):
             return False
 
     @staticmethod
-    def _recv_from(sock, n):
+    def _recv_from(sock: _socket.socket, n: int) -> bytes:
         buf = bytearray()
         while len(buf) < n:
             chunk = sock.recv(n - len(buf))
@@ -564,7 +582,7 @@ class TCPBridgeClient(BaseBridgeClient):
         )
         return False
 
-    def close(self):
+    def close(self) -> None:
         if self.sock:
             try:
                 self.sock.shutdown(_socket.SHUT_RDWR)
@@ -577,7 +595,7 @@ class TCPBridgeClient(BaseBridgeClient):
             self.sock = None
 
     # ---- I/O ---------------------------------------------------------------
-    def _exchange_with_timeout(self, req_json, method):
+    def _exchange_with_timeout(self, req_json: bytes, method: str) -> dict[str, Any]:
         """Socket-deadline fast path: no worker thread per request.
 
         The deadline covers sendall and both recv phases. On timeout the
@@ -592,18 +610,21 @@ class TCPBridgeClient(BaseBridgeClient):
             return self._exchange_once(req_json)
         except _socket.timeout:
             self.close()
-            raise self._timeout_error(method, timeout)
+            raise self._timeout_error(method, timeout or 0)  # None blocks, unreachable
 
     def _exchange_once(self, req_json: bytes) -> dict:
+        sock = self.sock
+        if sock is None:  # narrowed for the checker; send_command reconnects first
+            raise ConnectionError("Not connected")
         payload = struct.pack('<I', len(req_json)) + req_json
-        self.sock.sendall(payload)
+        sock.sendall(payload)
         self._inflight_sent = True
 
-        resp_len = struct.unpack('<I', self._recv_from(self.sock, 4))[0]
+        resp_len = struct.unpack('<I', self._recv_from(sock, 4))[0]
         if resp_len > MAX_RESPONSE_SIZE_BYTES:
             raise ConnectionError(f"Response too large: {resp_len} bytes")
 
-        body = self._recv_from(self.sock, resp_len)
+        body = self._recv_from(sock, resp_len)
         return _decode_json_body(body)
 
 
@@ -633,7 +654,7 @@ def _decode_json_body(body: bytes) -> dict:
 # CLIENT FACTORY
 # ============================================================================
 
-def _create_client():
+def _create_client() -> TCPBridgeClient:
     debug_log(f"Transport: TCP ({CE_HOST}:{CE_PORT})")
     return TCPBridgeClient(CE_HOST, CE_PORT)
 
@@ -641,7 +662,8 @@ def _create_client():
 ce_client = _create_client()
 
 
-def call(method, params=None, retries=None):
+def call(method: str, params: dict[str, Any] | None = None,
+         retries: int | None = None) -> dict[str, Any]:
     """Invoke a bridge command and NEVER raise.
 
     Every MCP tool goes through this so a dead bridge, a timeout or a bad
@@ -682,14 +704,14 @@ mcp = _ServerClass(MCP_SERVER_NAME)
 # runtime and best-effort sends notifications/tools/list_changed.
 # ============================================================================
 
-_TOOL_SPECS = []  # function objects in definition order; FastMCP derives the
+_TOOL_SPECS: list[Callable[..., Any]] = []  # function objects in definition order; FastMCP derives the
                   # tool name and description from __name__ / __doc__
 
 
-def _record_tool(*_args, **_kwargs):
+def _record_tool(*_args: Any, **_kwargs: Any) -> Any:
     """Drop-in stand-in for the SDK's tool() during the module body: record the
     function for selective registration instead of registering immediately."""
-    def decorator(fn):
+    def decorator(fn: Any) -> Any:
         _TOOL_SPECS.append(fn)
         return fn
     # Guard against a bare @mcp.tool (no parentheses): the SDK would receive
@@ -699,7 +721,7 @@ def _record_tool(*_args, **_kwargs):
     return decorator
 
 
-mcp.tool = _record_tool  # instance attribute shadows the class method until
+mcp.tool = _record_tool  # type: ignore[method-assign]  # instance attr shadows the method until
                          # startup registration completes, then it is removed
 
 # --- BRIDGE INTROSPECTION & BATCHING ---
@@ -730,7 +752,7 @@ def list_bridge_methods(prefix: str = "", offset: int = 0, limit: int = 500) -> 
 
     Returns JSON with: success, total, offset, limit, returned, methods.
     """
-    params = {"offset": offset, "limit": limit}
+    params: dict[str, Any] = {"offset": offset, "limit": limit}
     if prefix:
         params["prefix"] = prefix
     return format_result(call("list_methods", params))
@@ -883,7 +905,7 @@ def dialog_enum() -> str:
     return format_result(call("dll_enum_dialogs", {}))
 
 @mcp.tool()
-def dialog_dismiss(index: int = None, hwnd: int = None, title: str = None,
+def dialog_dismiss(index: int | None = None, hwnd: int | None = None, title: str | None = None,
                    force: bool = False) -> str:
     """Close a Cheat Engine window remotely (DLL fast path, works while blocked).
 
@@ -901,7 +923,7 @@ def dialog_dismiss(index: int = None, hwnd: int = None, title: str = None,
     Returns JSON with: success, posted, hwnd, class.
     Error codes: INVALID_PARAMS, INVALID_TARGET, NOT_FOUND, PROTECTED_WINDOW.
     """
-    params = {}
+    params: dict[str, Any] = {}
     if index is not None: params["index"] = index
     if hwnd is not None: params["hwnd"] = hwnd
     if title is not None: params["title"] = title
@@ -909,7 +931,7 @@ def dialog_dismiss(index: int = None, hwnd: int = None, title: str = None,
     return format_result(call("dll_dismiss_dialog", params))
 
 @mcp.tool()
-def wait_until(method: str, params: dict = None, path: str = "success",
+def wait_until(method: str, params: dict | None = None, path: str = "success",
                expected=None, timeout: float = 30.0, interval: float = 1.0) -> str:
     """Poll a bridge command until a field in its result reaches a value.
 
@@ -946,7 +968,7 @@ def wait_until(method: str, params: dict = None, path: str = "success",
     attempts, last_value, last_result = 0, None, None
     segments = [seg for seg in str(path).split(".") if seg]
 
-    def _walk(obj):
+    def _walk(obj: Any) -> Any:
         cur = obj
         for seg in segments:
             if isinstance(cur, dict) and seg in cur:
@@ -960,7 +982,7 @@ def wait_until(method: str, params: dict = None, path: str = "success",
                 return None
         return cur
 
-    def _matches(value):
+    def _matches(value: Any) -> bool:
         if value == expected:
             return True
         return isinstance(expected, str) and str(value) == expected
@@ -1079,7 +1101,7 @@ def read_string(address: str, max_length: int = 256, wide: bool = False, encodin
     return format_result(call("read_string", {"address": address, "max_length": max_length, "wide": wide, "encoding": resolved_encoding}))
 
 @mcp.tool()
-def read_pointer(address: str, offsets: list[int] = None) -> str:
+def read_pointer(address: str, offsets: list[int] | None = None) -> str:
     """Read a pointer chain. Returns the final address and value."""
     # Bridge supports 'read_pointer' for single dereference or 'read_pointer_chain' for multiple
     if offsets:
@@ -1091,6 +1113,28 @@ def read_pointer(address: str, offsets: list[int] = None) -> str:
 def read_pointer_chain(base: str, offsets: list[int]) -> str:
     """Follow a multi-level pointer chain and return analysis of every step."""
     return format_result(call("read_pointer_chain", {"base": base, "offsets": offsets}))
+
+@mcp.tool()
+def validate_pointer_chain(base: str, offsets: list[int] | None = None) -> str:
+    """Health-check a pointer chain: is it alive, and if not, which hop died?
+
+    Unlike read_pointer_chain (which answers "what is the final address"), this
+    diagnoses pointer validity: every step reports the pointer value read, the
+    dereferenced address and whether the target is still readable. Use it to
+    verify that a CT pointer path still survives after a game update, or to
+    find the exact broken hop when a record stopped working.
+
+    Args:
+        base: Base address (hex string like "game.exe+10C4F30", or number).
+        offsets: Up to 32 chain offsets applied after each dereference.
+
+    Returns JSON with success, valid (bool), failed_step (0 = base unreadable),
+    steps (each with address, pointer_value, next_address, next_readable) and
+    final_address/final_readable when valid. Error codes: INVALID_ADDRESS,
+    INVALID_PARAMS (>32 offsets, non-numeric offset).
+    """
+    return format_result(call("validate_pointer_chain",
+                              {"base": base, "offsets": offsets or []}))
 
 @mcp.tool()
 def checksum_memory(address: str, size: int) -> str:
@@ -1105,7 +1149,7 @@ def scan_all(value: str, type: str = "exact", protection: str = "+W-C") -> str:
     return format_result(call("scan_all", {"value": value, "type": type, "protection": protection}))
 
 @mcp.tool()
-def get_scan_results(offset: int = 0, limit: int = 100, max: int = None) -> str:
+def get_scan_results(offset: int = 0, limit: int = 100, max: int | None = None) -> str:
     """Get results from the last 'scan_all' operation.
 
     Args:
@@ -1159,7 +1203,7 @@ def get_memory_regions(max: int = 100) -> str:
     return format_result(call("get_memory_regions", {"max": max}))
 
 @mcp.tool()
-def enum_memory_regions_full(offset: int = 0, limit: int = 100, max: int = None) -> str:
+def enum_memory_regions_full(offset: int = 0, limit: int = 100, max: int | None = None) -> str:
     """Enumerate ALL memory regions in the process (Native EnumMemoryRegions).
 
     Args:
@@ -1236,7 +1280,7 @@ def dissect_structure(address: str, size: int = 256) -> str:
 # --- DEBUGGING & BREAKPOINTS ---
 
 @mcp.tool()
-def set_breakpoint(address: str, id: str = None, capture_registers: bool = True, capture_stack: bool = False, stack_depth: int = 16) -> str:
+def set_breakpoint(address: str, id: str | None = None, capture_registers: bool = True, capture_stack: bool = False, stack_depth: int = 16) -> str:
     """Set a hardware execution breakpoint. Non-breaking/Logging only."""
     return format_result(call("set_breakpoint", {
         "address": address, 
@@ -1247,7 +1291,7 @@ def set_breakpoint(address: str, id: str = None, capture_registers: bool = True,
     }))
 
 @mcp.tool()
-def set_data_breakpoint(address: str, id: str = None, access_type: str = "w", size: int = 4) -> str:
+def set_data_breakpoint(address: str, id: str | None = None, access_type: str = "w", size: int = 4) -> str:
     """Set a hardware data breakpoint (watchpoint). Types: 'r' (read), 'w' (write), 'rw' (access)."""
     return format_result(call("set_data_breakpoint", {
         "address": address, 
@@ -1272,7 +1316,7 @@ def clear_all_breakpoints() -> str:
     return format_result(call("clear_all_breakpoints"))
 
 @mcp.tool()
-def get_breakpoint_hits(id: str = None, clear: bool = False, offset: int = 0, limit: int = 100) -> str:
+def get_breakpoint_hits(id: str | None = None, clear: bool = False, offset: int = 0, limit: int = 100) -> str:
     """Get hits for a specific breakpoint ID (or all if None). Set clear=True to flush buffer.
 
     Args:
@@ -1480,7 +1524,7 @@ def auto_assemble(script: str) -> str:
 @mcp.tool()
 def assemble_instruction(
     line: str,
-    address: str = None,
+    address: str | None = None,
     preference: int = 0,
     skip_range_check: bool = False,
 ) -> str:
@@ -1520,7 +1564,7 @@ def auto_assemble_check(
 @mcp.tool()
 def compile_c_code(
     source: str,
-    address: str = None,
+    address: str | None = None,
     target_self: bool = False,
     kernelmode: bool = False,
 ) -> str:
@@ -1540,8 +1584,8 @@ def compile_c_code(
 @mcp.tool()
 def compile_cs_code(
     source: str,
-    references: list = None,
-    core_assembly: str = None,
+    references: list | None = None,
+    core_assembly: str | None = None,
 ) -> str:
     """Compile C# source code using CE's .NET compiler (requires .NET 4+).
 
@@ -1684,7 +1728,7 @@ def in_main_thread() -> str:
     """
     return format_result(call("in_main_thread"))
 # >>> BEGIN UNIT-20b Shell Execution <<<
-def _check_shell_gate():
+def _check_shell_gate() -> str | None:
     if os.environ.get("CE_MCP_ALLOW_SHELL") != "1":
         return json.dumps({
             "success": False,
@@ -1712,7 +1756,7 @@ def run_command(command: str, args: str = "") -> str:
     return format_result(call("run_command", {"command": command, "args": args}))
 
 @mcp.tool()
-def shell_execute(command: str, args: str = "", verb: str = "open", working_dir: str = "", showcommand: int = None) -> str:
+def shell_execute(command: str, args: str = "", verb: str = "open", working_dir: str = "", showcommand: int | None = None) -> str:
     """Invoke Windows ShellExecute. SECURITY: Arbitrary code execution.
 
     REQUIRES environment variable CE_MCP_ALLOW_SHELL=1 at server startup.
@@ -1729,7 +1773,7 @@ def shell_execute(command: str, args: str = "", verb: str = "open", working_dir:
     blocked = _check_shell_gate()
     if blocked:
         return blocked
-    params = {
+    params: dict[str, Any] = {
         "command": command,
         "args": args,
         "verb": verb,
@@ -1910,7 +1954,29 @@ def get_address_list(offset: int = 0, limit: int = 100) -> str:
     return format_result(call("get_address_list", {"offset": offset, "limit": limit}))
 
 @mcp.tool()
-def get_memory_record(id: int = None, description: str = None) -> str:
+def ct_memory_records_health(limit: int = 1000) -> str:
+    """Health-check every memory record in the loaded cheat table.
+
+    Resolves each record's address expression and probes target readability,
+    answering "which entries of my cheat table died" (stale symbols after a
+    game update, freed pointer targets, ...) without clicking through the CE
+    GUI. Per-record status: "ok" (resolved and readable), "unresolved"
+    (address expression no longer evaluates), "unreadable" (resolved but
+    target memory not readable), "script" (AA-script record, no address to
+    check), "group" (group header).
+
+    Args:
+        limit: Max records to check in one call (default 1000, hard cap 5000;
+            each check costs two CE main-thread calls). truncated=true in the
+            response means raise the limit or narrow the table.
+
+    Returns JSON with: success, total, checked, truncated, summary counts and
+    records (each with id, description, address, status, resolved_address).
+    """
+    return format_result(call("ct_memory_records_health", {"limit": limit}))
+
+@mcp.tool()
+def get_memory_record(id: int | None = None, description: str | None = None) -> str:
     """Retrieve a single memory record by ID or description.
 
     Args:
@@ -1919,7 +1985,7 @@ def get_memory_record(id: int = None, description: str = None) -> str:
 
     Returns JSON with: success, record ({id, description, address, type, value, offsets, enabled}).
     """
-    params = {}
+    params: dict[str, Any] = {}
     if id is not None:
         params["id"] = id
     if description is not None:
@@ -1996,7 +2062,7 @@ def set_memory_record_active(id: int, active: bool) -> str:
     return format_result(call("set_memory_record_active", {"id": id, "active": active}))
 
 @mcp.tool()
-def set_memory_record_address(id: int, address: str, offsets: list = None) -> str:
+def set_memory_record_address(id: int, address: str, offsets: list | None = None) -> str:
     """Retarget a memory record to a new address, optionally making it a pointer.
 
     Args:
@@ -2013,8 +2079,8 @@ def set_memory_record_address(id: int, address: str, offsets: list = None) -> st
     return format_result(call("set_memory_record_address", params))
 
 @mcp.tool()
-def set_memory_record_type(id: int, var_type: str, size: int = None, unicode: bool = None,
-                           startbit: int = None, bit_size: int = None) -> str:
+def set_memory_record_type(id: int, var_type: str, size: int | None = None, unicode: bool | None = None,
+                           startbit: int | None = None, bit_size: int | None = None) -> str:
     """Change the variable type of a memory record.
 
     Args:
@@ -2171,7 +2237,7 @@ def get_screen_info() -> str:
 # --- WINDOW / GUI TOOLS (Unit-16) ---
 
 @mcp.tool()
-def find_window(title: str = None, class_name: str = None) -> str:
+def find_window(title: str | None = None, class_name: str | None = None) -> str:
     """Find a top-level window by title and/or class name (system-wide, no process required).
 
     At least one of title or class_name must be provided.
@@ -2293,7 +2359,7 @@ def aob_scan_module_unique(pattern: str, module_name: str, protection: str = "+X
     }))
 
 @mcp.tool()
-def pointer_rescan(value: str, previous_results_file: str = None) -> str:
+def pointer_rescan(value: str, previous_results_file: str | None = None) -> str:
     """Re-scan an existing pointer scan for a new value. Requires a prior pointer scan in CE.
     Returns {success, result_count}. Run a Pointer Scanner scan in CE first."""
     params = {"value": value}
@@ -2321,7 +2387,7 @@ def persistent_scan_first_scan(name: str, value: str, type: str = "dword", scan_
     }))
 
 @mcp.tool()
-def persistent_scan_next_scan(name: str, value: str = None, scan_option: str = "exact") -> str:
+def persistent_scan_next_scan(name: str, value: str | None = None, scan_option: str = "exact") -> str:
     """Narrow down results with a next scan on a named persistent scan session.
     Scan options: exact, increased, decreased, changed, unchanged, bigger, smaller.
     Returns {success, scan_name, count}."""
@@ -2348,7 +2414,7 @@ def persistent_scan_destroy(name: str) -> str:
 # --- MEMORY OPERATIONS (Unit 14) ---
 
 @mcp.tool()
-def copy_memory(source: str, size: int, dest: str = None, method: int = 0) -> str:
+def copy_memory(source: str, size: int, dest: str | None = None, method: int = 0) -> str:
     """Copy memory between addresses. Methods: 0=target→target, 1=target→CE, 2=CE→target, 3=CE→CE. Returns dest_address allocated by CE if dest is None."""
     return format_result(call("copy_memory", {
         "source": source, "size": size, "dest": dest, "method": method
@@ -2393,7 +2459,7 @@ def create_section(size: int) -> str:
     return format_result(call("create_section", {"size": size}))
 
 @mcp.tool()
-def map_view_of_section(handle: str, address: str = None, size: int = 0) -> str:
+def map_view_of_section(handle: str, address: str | None = None, size: int = 0) -> str:
     """Map a section into the target process. 'handle' is from create_section. 'address' is optional preferred base. Returns mapped_address."""
     return format_result(call("map_view_of_section", {
         "handle": handle, "address": address, "size": size
@@ -2698,7 +2764,7 @@ def execute_code_ex(
     call_method: int,
     timeout: int,
     address: str,
-    args: list = None,
+    args: list | None = None,
 ) -> str:
     """Call a function with an explicit calling convention and multiple arguments.
 
@@ -2731,7 +2797,7 @@ def execute_code_ex(
 def execute_method(
     address: str,
     instance: str,
-    args: list = None,
+    args: list | None = None,
     call_method: int = 0,
     timeout: int = -1,
 ) -> str:
@@ -2783,7 +2849,7 @@ def execute_code_local(address: str, param: int = 0) -> str:
 @mcp.tool()
 def execute_code_local_ex(
     address: str,
-    args: list = None,
+    args: list | None = None,
     call_method: int = 0,
 ) -> str:
     """Call a function inside Cheat Engine's own process with explicit calling convention.
@@ -2813,7 +2879,7 @@ def execute_code_local_ex(
 # >>> BEGIN UNIT-08 Memory Allocation <<<
 
 @mcp.tool()
-def allocate_memory(size: int, base_address: str = None, protection: str = "rwx") -> str:
+def allocate_memory(size: int, base_address: str | None = None, protection: str = "rwx") -> str:
     """Allocate memory in the target process.
 
     Args:
@@ -3031,7 +3097,7 @@ def set_signature_tokens(tokens: dict, version: str = "") -> str:
     version defaults to the running game's FileVersion; use "*" for a version-independent rule.
     Stored in MCP_Server/sig_tokens.txt so it survives restarts.
     Returns {success, version, tokens_set:[str], file}."""
-    p = {"tokens": tokens}
+    p: dict[str, Any] = {"tokens": tokens}
     if version:
         p["version"] = version
     return format_result(call("set_signature_tokens", p))
@@ -3569,6 +3635,7 @@ _TOOL_CATEGORIES = {
     # --- memory ---
     "read_memory": "memory", "read_integer": "memory", "read_string": "memory",
     "read_pointer": "memory", "read_pointer_chain": "memory",
+    "validate_pointer_chain": "memory",
     "checksum_memory": "memory", "write_integer": "memory",
     "write_memory": "memory", "write_string": "memory", "copy_memory": "memory",
     "compare_memory": "memory", "md5_memory": "memory",
@@ -3642,6 +3709,7 @@ _TOOL_CATEGORIES = {
     "patch_memory_record_script": "table",
     "undo_memory_record_script_patch": "table",
     "load_table": "table", "save_table": "table", "get_address_list": "table",
+    "ct_memory_records_health": "table",
     "get_memory_record": "table", "create_memory_record": "table",
     "delete_memory_record": "table", "get_memory_record_value": "table",
     "set_memory_record_value": "table", "set_memory_record_active": "table",
@@ -3732,7 +3800,7 @@ _registered_tool_names = {"ce_tools_manage"}
 _register_lock = threading.Lock()
 
 
-def _resolve_profile(raw_value):
+def _resolve_profile(raw_value: str | None) -> list[str]:
     """Parse a CE_MCP_TOOLS value into an ordered, validated category list."""
     raw = (raw_value or "all").strip()
     if raw.lower() in ("all", "*", ""):
@@ -3758,17 +3826,17 @@ def _resolve_profile(raw_value):
 _TOOL_CATEGORIES_ORDER_SET = set(_TOOL_CATEGORY_ORDER)
 
 
-def _uncategorized_tool_names():
+def _uncategorized_tool_names() -> list[str]:
     return sorted(fn.__name__ for fn in _TOOL_SPECS
                   if fn.__name__ not in _TOOL_CATEGORIES)
 
 
-def _register_tool_fn(fn):
+def _register_tool_fn(fn: Any) -> None:
     mcp.add_tool(fn)
     _registered_tool_names.add(fn.__name__)
 
 
-def _notify_tool_list_changed():
+def _notify_tool_list_changed() -> tuple[bool, str]:
     """Best-effort notifications/tools/list_changed to the connected client.
 
     Returns (sent: bool, detail: str). Never raises: clients that do not
@@ -3777,14 +3845,14 @@ def _notify_tool_list_changed():
     """
     session = None
     try:
-        ctx = mcp.get_context()  # FastMCP 1.x
+        ctx = mcp.get_context()  # type: ignore[attr-defined]  # FastMCP 1.x
         session = getattr(ctx, "session", None)
     except Exception:
         session = None
     if session is None:
         try:  # mcp 2.x: read the lowlevel server's request contextvar
             from mcp.server.lowlevel import server as _ll_server
-            rc = _ll_server.request_context.get(None)
+            rc = _ll_server.request_context.get(None)  # type: ignore[attr-defined]
             session = getattr(rc, "session", None)
         except Exception:
             session = None
@@ -3799,7 +3867,7 @@ def _notify_tool_list_changed():
         return False, f"list_changed notification skipped ({exc}); refresh the tool list manually"
 
 
-def _enable_categories(categories, notify=True):
+def _enable_categories(categories: list[str], notify: bool = True) -> tuple[list[str], bool, str]:
     """Register every recorded tool of the given categories. Idempotent.
 
     Returns (added: list[str], notified: bool, notify_detail: str).
@@ -3901,7 +3969,7 @@ def ce_tools_manage(action: str = "list", categories=None) -> str:
 mcp.add_tool(ce_tools_manage)
 
 
-def _register_startup_tools():
+def _register_startup_tools() -> None:
     """Register the tool profile selected by CE_MCP_TOOLS (default: all)."""
     uncategorized = _uncategorized_tool_names()
     if uncategorized:

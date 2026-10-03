@@ -538,7 +538,7 @@ def run_self_test():
 
     # -------------------------------------------------- layered tool loading
     c.section("layered tool loading (UNIT-32)")
-    c.check("243 tools recorded at definition time", len(ce._TOOL_SPECS) == 243,
+    c.check("245 tools recorded at definition time", len(ce._TOOL_SPECS) == 245,
             len(ce._TOOL_SPECS))
     c.check("category catalog covers every tool",
             ce._uncategorized_tool_names() == [], ce._uncategorized_tool_names())
@@ -556,11 +556,11 @@ def run_self_test():
         return len(await server.list_tools())
 
     n_tools = asyncio.run(_count_tools(ce.mcp))
-    c.check("default profile registers 244 tools (243 + ce_tools_manage)",
-            n_tools == 244, n_tools)
+    c.check("default profile registers 246 tools (245 + ce_tools_manage)",
+            n_tools == 246, n_tools)
     catalog = json.loads(ce.ce_tools_manage("list"))
-    c.check("ce_tools_manage('list') reports 244 available",
-            catalog.get("success") is True and catalog.get("total_available") == 244,
+    c.check("ce_tools_manage('list') reports 246 available",
+            catalog.get("success") is True and catalog.get("total_available") == 246,
             results_to_text(catalog)[:120])
     enabled = json.loads(ce.ce_tools_manage("enabled"))
     c.check("ce_tools_manage('enabled') count matches list_tools",
@@ -655,6 +655,38 @@ def run_self_test():
     for conn in holder:
         conn.close()
     srv.close()
+
+    # ------------------------------------------------------ shock / big data
+    c.section("shock resistance + large payloads (v15.7.0)")
+    gcli = ce.TCPBridgeClient("127.0.0.1", 1)
+    gcli.timeout_seconds = None
+    gcli.max_retries = 0
+    gcli.sock = socket.socket()
+    gcli._inflight_sent = True  # behave like a delivered frame: no retry on error
+    def _garbage(req_json):
+        return b"\xde\xad\xbe\xef not json at all"
+    gcli._exchange_once = _garbage
+    r = gcli.send_command("x")
+    c.check("garbage response -> structured INTERNAL_ERROR (no crash)",
+            isinstance(r, dict) and r.get("success") is False
+            and r.get("error_code") == "INTERNAL_ERROR"
+            and "Malformed response" in str(r.get("error")), results_to_text(r))
+    try:
+        ce._decode_json_body(b"\xde\xad\xbe\xef not json")
+        decode_raises = False
+    except ConnectionError as exc:
+        decode_raises = "Invalid JSON" in str(exc)
+    c.check("garbage body raises ConnectionError at the decode layer",
+            decode_raises, "raised=%s" % decode_raises)
+
+    big = "A" * (1024 * 1024)  # 1 MiB string, well under the 4 MiB frame cap
+    t0 = time.monotonic()
+    r = ce.call("echo", {"blob": big})
+    dt = time.monotonic() - t0
+    ok_big = isinstance(r, dict) and r.get("success") is True and r.get("echo", {}).get("blob") == big
+    c.check("1 MiB payload round trip intact", ok_big,
+            "len=%s dt=%.0fms" % (len(big), dt * 1000))
+    c.check("1 MiB round trip under 5 s (stub)", dt < 5.0, "%.0fms" % (dt * 1000))
 
     stub.stop()
     return c.summary()

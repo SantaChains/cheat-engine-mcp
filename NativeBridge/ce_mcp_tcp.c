@@ -345,12 +345,21 @@ static const char* extract_json_method(const char *json, char *out, int outLen) 
  *   dll_enum_dialogs    EnumWindows of this process (modal detection)
  *   dll_dismiss_dialog  PostMessageW(WM_CLOSE) a dialog, guarded by class name
  *
+ * v3.3.5: shared-token gate for the fast path. When CE_MCP_AUTH_TOKEN is set
+ * in the CE process environment, every dll_* request must carry
+ * params._auth == token (the Python client injects it in _build_request for
+ * every call). Without this gate the fast path bypassed the Lua-side
+ * executeCommand token check entirely -- dll_dismiss_dialog (a mutating
+ * command) would have been callable unauthenticated. Comparison is
+ * length-independent to deny timing oracles. Unset on both sides = open
+ * loopback access (the default).
+ *
  * poll_age_ms: l_mcp_tcp_poll is called every 1 ms by the Lua timer. A large
  * age means the main thread stopped servicing the bridge -- blocked by a modal
  * dialog OR running a long command; dll_enum_dialogs disambiguates the two.
  */
 
-#define DLL_VERSION   "3.3.4"
+#define DLL_VERSION   "3.3.5"
 #define LUA_RESPONSIVE_THRESHOLD_MS 5000
 #define MAX_DIALOGS   64
 
@@ -360,6 +369,25 @@ static volatile LONG g_bytes_rx  = 0, g_bytes_tx  = 0;
 static DWORD g_dll_start_tick = 0;
 static char g_last_method[128] = {0};            /* guarded by g_lm_lock */
 static SRWLOCK g_lm_lock = SRWLOCK_INIT;         /* statically initialized */
+
+/* Shared-token gate (v3.3.5). Captured once in luaopen from the CE process
+ * environment; empty = open access. Read-only after startup, so no lock. */
+static char g_auth_token[128] = {0};
+
+/* Constant-time string compare (XOR-accumulate): a mismatch must not leak the
+ * token byte-by-byte through timing. Zero-padded to the longer length, so a
+ * length difference itself lands in the accumulator. */
+static int secure_token_eq(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b), i, n = la > lb ? la : lb;
+    unsigned char diff = (unsigned char)(la != lb);
+    if (la == 0 || lb == 0) return 0;
+    for (i = 0; i < n; i++) {
+        unsigned char ca = (unsigned char)(i < la ? a[i] : 0);
+        unsigned char cb = (unsigned char)(i < lb ? b[i] : 0);
+        diff |= (unsigned char)(ca ^ cb);
+    }
+    return diff == 0;
+}
 
 static void counters_add(volatile LONG *dst, LONG delta) {
     InterlockedExchangeAdd(dst, delta);
@@ -685,6 +713,25 @@ static char* fp_dll_dismiss(const char *cmd, const char *id) {
 static char* handle_dll_fastpath(const char *cmd, const char *method) {
     char idTok[48];
     json_extract_id(cmd, idTok, sizeof(idTok));
+
+    /* Shared-token gate (v3.3.5): the Lua dispatcher checks params._auth in
+     * executeCommand, but this fast path never reaches Lua. Enforce the same
+     * contract here so the whole dll_* family honours CE_MCP_AUTH_TOKEN. The
+     * Python client injects params._auth on every request when configured. */
+    if (g_auth_token[0] != '\0') {
+        char presented[128];
+        if (!json_extract_string(cmd, "_auth", presented, sizeof(presented)) ||
+            !secure_token_eq(presented, g_auth_token)) {
+            char *r = (char*)malloc(512);
+            if (r) _snprintf(r, 512,
+                "{\"jsonrpc\":\"2.0\",\"id\":%s,\"error\":{\"code\":-32000,"
+                "\"message\":\"Authentication failed\",\"data\":{"
+                "\"error_code\":\"AUTH_REQUIRED\",\"detail\":\"set "
+                "CE_MCP_AUTH_TOKEN and send params._auth with every request\"}}}",
+                idTok);
+            return r;
+        }
+    }
 
     if      (strcmp(method, "dll_ping")           == 0) return fp_dll_ping(idTok);
     else if (strcmp(method, "dll_status")         == 0) return fp_dll_status(idTok);
@@ -1192,6 +1239,19 @@ __declspec(dllexport) int luaopen_ce_mcp_tcp(lua_State *L) {
     }
 
     /* ---- NATIVE LUA API MODE ---- */
+
+    /* v3.3.5: capture the shared token once, here rather than in DllMain --
+     * luaopen runs after LoadLibrary has released the loader lock, and getenv
+     * is trivial. Same env var the Lua side reads via os.getenv. */
+    {
+        const char *envTok = getenv("CE_MCP_AUTH_TOKEN");
+        if (envTok && *envTok) {
+            strncpy(g_auth_token, envTok, sizeof(g_auth_token) - 1);
+            g_auth_token[sizeof(g_auth_token) - 1] = '\0';
+            dbg_log("[MCP-DLL] auth token gate enabled");
+        }
+    }
+
     lua_register_func(L, "mcp_tcp_start",   l_mcp_tcp_start);
     lua_register_func(L, "mcp_tcp_stop",    l_mcp_tcp_stop);
     lua_register_func(L, "mcp_tcp_poll",    l_mcp_tcp_poll);
@@ -1201,7 +1261,7 @@ __declspec(dllexport) int luaopen_ce_mcp_tcp(lua_State *L) {
     dbg_log("[MCP-DLL] Native mode: 5 Lua functions registered (dll_* fastpath enabled)");
 
     lua_newtable(L);
-    lua_setstrfield(L, -1, "version", "3.3.4");
+    lua_setstrfield(L, -1, "version", "3.3.5");
     lua_setstrfield(L, -1, "transport", "native_tcp");
     return 1;
 }
@@ -1216,7 +1276,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
          * dbg_log() lazy-initializes the console on first use, which happens
          * inside luaopen_ce_mcp_tcp -- after LoadLibrary has released the
          * loader lock. */
-        dbg_log("[MCP-DLL] ce_mcp_tcp.dll loaded (v3.3.4)");
+        dbg_log("[MCP-DLL] ce_mcp_tcp.dll loaded (v3.3.5)");
     }
     if (reason == DLL_PROCESS_DETACH) {
         dbg_log("[MCP-DLL] DLL unloading...");

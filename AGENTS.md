@@ -9,8 +9,8 @@ A three-tier bridge that lets AI agents (via MCP) drive Cheat Engine to inspect 
 running Windows process. See `README.md` for user-facing docs.
 
 - Wire protocol version: `v99` (length-prefixed JSON-RPC over TCP)
-- Bridge script version: **`15.6.1`** (`VERSION` in `ce_mcp_bridge.lua`)
-- Surface: **248 dispatcher methods** in Lua, **244 registered MCP tools** in Python (243 recorded tools plus the
+- Bridge script version: **`15.7.0`** (`VERSION` in `ce_mcp_bridge.lua`)
+- Surface: **250 dispatcher methods** in Lua, **246 registered MCP tools** in Python (245 recorded tools plus the
   always-present `ce_tools_manage` progressive-loading meta tool; the difference is
   aliases such as `read_bytes` → `read_memory`, and `batch` which is a transport-level primitive)
 
@@ -43,7 +43,7 @@ execute `dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua
 pasting the full bridge. Success log:
 
 ```
-[MCP] Bridge v15.6.1 started on port 17171 (native TCP, 1ms poll)
+[MCP] Bridge v15.7.0 started on port 17171 (native TCP, 1ms poll)
 ```
 
 Re-executing the script auto-calls `StopMCPBridge` / `cleanupZombieState` first, so reloading is safe.

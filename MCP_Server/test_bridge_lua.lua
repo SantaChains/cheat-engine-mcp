@@ -47,7 +47,7 @@ end
 
 -- ---------------------------------------------------------------- dispatcher
 print("== version / dispatcher ==")
-ok("version is 15.6.1", MCP_Bridge.version == "15.6.1", MCP_Bridge.version)
+ok("version is 15.7.0", MCP_Bridge.version == "15.7.0", MCP_Bridge.version)
 ok("batch / status / list_methods registered",
    MCP_Bridge.methods.batch and MCP_Bridge.methods.status and MCP_Bridge.methods.list_methods)
 local methodCount = 0
@@ -191,7 +191,7 @@ ok("string shorthand entry rejected as method-not-found",
 -- ------------------------------------------------------------- introspection
 print("== status / list_methods ==")
 local st = req("status")
-ok("status ok", st and st.result.success == true and st.result.version == "15.6.1")
+ok("status ok", st and st.result.success == true and st.result.version == "15.7.0")
 ok("method_count matches dispatcher", st and st.result.method_count == methodCount,
    st and st.result.method_count)
 ok("process_attached reflects CE state", st and st.result.process_attached == false)
@@ -207,7 +207,7 @@ ok("list_methods sorted", lm and lm.result.methods[1] <= lm.result.methods[2])
 local lmp = req("list_methods", { prefix = "dbk" })
 ok("prefix filter", lmp and lmp.result.total == 8 and lmp.result.methods[1] == "dbk_get_cr0",
    lmp and lmp.result.total)
-ok("status alias bridge_status", req("bridge_status").result.version == "15.6.1")
+ok("status alias bridge_status", req("bridge_status").result.version == "15.7.0")
 ok("list alias list_bridge_methods",
    req("list_bridge_methods", { limit = 1 }).result.total == methodCount)
 
@@ -860,8 +860,8 @@ ok("set_speed / create_hotkey / dbvm_cloak_write audited",
    seen["set_speed"] and seen["create_hotkey"] and seen["dbvm_cloak_write"],
    al31 and json.encode(al31.result.entries))
 
--- ---- v15.6.1: exact-set audit coverage + clamps -------------------------------------------------
-print("== v15.6.1 quality pass ==")
+-- ---- v15.7.0: exact-set audit coverage + clamps -------------------------------------------------
+print("== v15.7.0 quality pass ==")
 -- evaluate_lua must be audited even though the "evaluate_" prefix only covers
 -- the execute_code family... it does not match any prefix; the exact set does.
 local al_eval = req("get_audit_log", { limit = 200 })
@@ -888,7 +888,138 @@ local oobWrite = req("write_integer", { address = "0x401000", value = 300, type 
 ok("write_integer range message", oobWrite and oobWrite.result.success == false
    and tostring(oobWrite.result.error):find("out of range") ~= nil, json.encode(oobWrite))
 
--- ---- auth gate (CE_MCP_AUTH_TOKEN, v15.6.1) ----------------------------------------------------------
+-- ---- UNIT-33 (v15.7.0): pointer-chain validation + CT records health ---------
+local function _test_unit33()
+print("== UNIT-33 pointer & CT health ==")
+
+-- Default mocks: readPointer is undefined -> pcall fails -> chain breaks at step 1.
+local vFail = req("validate_pointer_chain", { base = "0x1000", offsets = { 0x10 } })
+ok("pointer chain: nil readPointer -> invalid at step 1",
+   vFail and vFail.result.success == true and vFail.result.valid == false
+   and vFail.result.failed_step == 1, json.encode(vFail))
+
+local vBad = req("validate_pointer_chain", { base = "not-hex", offsets = {} })
+ok("pointer chain: unresolvable base -> INVALID_ADDRESS",
+   vBad and vBad.result.success == false and vBad.result.error_code == "INVALID_ADDRESS",
+   json.encode(vBad))
+
+local vMany = req("validate_pointer_chain", { base = "0x1000", offsets = {} })
+vMany = req("validate_pointer_chain",
+            { base = "0x1000", offsets = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 } })
+ok("pointer chain: 33 offsets -> INVALID_PARAMS",
+   vMany and vMany.result.success == false and vMany.result.error_code == "INVALID_PARAMS",
+   json.encode(vMany))
+
+-- Scoped richer mocks: alive chain + a 4-record address list.
+local _realReadPointer, _realReadBytes, _realGetAl = readPointer, readBytes, getAddressList
+do
+  readPointer = function(addr) return addr + 0x1000 end
+  readBytes   = function(addr, n, asTable) assert(asTable == true) return { 0 } end
+
+  local vOk = req("validate_pointer_chain", { base = "0x1000", offsets = { 0x10, 0x20 } })
+  ok("pointer chain: alive chain -> valid with 2 steps",
+     vOk and vOk.result.success == true and vOk.result.valid == true
+     and #vOk.result.steps == 2 and vOk.result.final_address == "0x3030",
+     vOk and json.encode(vOk.result))
+
+  local vDead = req("validate_pointer_chain", { base = "0x1000", offsets = { 0x10 } })
+  -- dereferenced target is always "readable" under this mock, so still valid;
+  -- instead simulate a dead hop by making readPointer fail on the second hop.
+  local hop = 0
+  readPointer = function(addr)
+    hop = hop + 1
+    if hop == 2 then return nil end
+    return addr + 0x1000
+  end
+  local vHop2 = req("validate_pointer_chain", { base = "0x1000", offsets = { 0x10, 0x20 } })
+  ok("pointer chain: dead second hop reported",
+     vHop2 and vHop2.result.valid == false and vHop2.result.failed_step == 2,
+     vHop2 and json.encode(vHop2.result))
+
+  local alive = { ID = 1, Description = "alive", Address = "0x401000" }
+  local dead  = { ID = 2, Description = "dead",  Address = "nothex" }
+  local grp   = { ID = 3, Description = "grp",   IsGroupHeader = true }
+  local scr   = { ID = 4, Description = "scr",   Script = "[enable]" }
+  local alMock = { Count = 4, [0] = alive, [1] = dead, [2] = grp, [3] = scr }
+  getAddressList = function() return alMock end
+
+  local h = req("ct_memory_records_health", {})
+  ok("CT health: 4 records classified ok/unresolved/group/script",
+     h and h.result.success == true and h.result.total == 4 and h.result.checked == 4
+     and h.result.summary.ok == 1 and h.result.summary.unresolved == 1
+     and h.result.summary.group == 1 and h.result.summary.script == 1
+     and h.result.truncated == false, h and json.encode(h.result))
+
+  local hLim = req("ct_memory_records_health", { limit = 2 })
+  ok("CT health: budget 2 -> truncated",
+     hLim and hLim.result.checked == 2 and hLim.result.truncated == true,
+     hLim and json.encode(hLim.result))
+
+  getAddressList = function() return { Count = 0 } end
+  local hEmpty = req("ct_memory_records_health", {})
+  ok("CT health: empty table -> all zeros",
+     hEmpty and hEmpty.result.total == 0 and hEmpty.result.summary.ok == 0,
+     hEmpty and json.encode(hEmpty.result))
+end
+readPointer, readBytes, getAddressList = _realReadPointer, _realReadBytes, _realGetAl
+end
+_test_unit33()
+
+-- ---- stability / shock + large-data experiments (v15.7.0) -------------------
+local function _test_stability()
+print("== stability / large data ==")
+
+-- 1. Deep nesting: 250-deep params must fail deterministically, never crash
+--    the dispatcher (codec depth cap is 200 on both encode and decode).
+local deepJson = '{"jsonrpc":"2.0","method":"status","params":{"a":'
+local close = ''
+for _ = 1, 250 do deepJson = deepJson .. '{' close = close .. '}' end
+deepJson = deepJson .. close .. '},"id":1}'
+local deepResp = MCP_Bridge.execute(deepJson)
+local deepOk = false
+pcall(function()
+  local d = json.decode(deepResp)
+  deepOk = (d.error ~= nil) or (d.result ~= nil)
+end)
+ok("250-deep nesting rejected without crashing", deepOk, deepResp and deepResp:sub(1, 120))
+
+-- 2. Audit ring stays bounded at MAX_AUDIT_ENTRIES and keeps the newest.
+for i = 1, 220 do req("set_speed", { speed = 1.0 + i / 1000 }) end
+local al = req("get_audit_log", { limit = 200 })
+ok("audit ring bounded at 200 after 220 mutations",
+   al and al.result.total == 200 and #al.result.entries == 200,
+   al and al.result.total)
+ok("audit ring keeps the newest entry",
+   al and al.result.entries[1] ~= nil and al.result.entries[1].method == "set_speed",
+   al and al.result.entries[1] and json.encode(al.result.entries[1]))
+
+-- 3. Batch boundary: 64 sub-calls execute; 65 is rejected up front.
+local calls64 = {}
+for _ = 1, 64 do calls64[#calls64 + 1] = { method = "status", params = {} } end
+local t0 = os.clock()
+local b64 = req("batch", { calls = calls64 })
+local batchMs = (os.clock() - t0) * 1000
+ok("batch of 64 executes fully", b64 and b64.result.succeeded == 64, b64 and b64.result.succeeded)
+local calls65 = {}
+for _ = 1, 65 do calls65[#calls65 + 1] = { method = "status", params = {} } end
+local b65 = req("batch", { calls = calls65 })
+ok("batch of 65 rejected", b65 and b65.result.success == false
+   and b65.result.error_code == "INVALID_PARAMS", json.encode(b65))
+
+-- 4. Large wire payload: a 512 KiB string param survives encode/decode.
+local big = string.rep("A", 512 * 1024)
+local t1 = os.clock()
+local bigEcho = MCP_Bridge_call("get_audit_log", { limit = 1, marker = big })
+local bigMs = (os.clock() - t1) * 1000
+local bigParsed = json.decode(bigEcho)
+ok("512 KiB string param round trip",
+   bigParsed and bigParsed.result ~= nil and bigParsed.result.success == true,
+   bigEcho and #bigEcho)
+print(("  [perf] batch64=%.1fms bigparam=%.1fms"):format(batchMs, bigMs))
+end
+_test_stability()
+
+-- ---- auth gate (CE_MCP_AUTH_TOKEN, v15.7.0) ----------------------------------------------------------
 -- Reload the bridge with a stubbed os.getenv so AUTH_TOKEN is resolved as set.
 -- Encapsulated in a function: the main chunk is at Lua's 200-local limit.
 local function auth_gate_tests()
@@ -916,7 +1047,7 @@ ok("wrong token rejected AUTH_REQUIRED",
 
 local good = raw_call("status", { _auth = "sekret-token" })
 ok("correct token accepted", good.result and good.result.success == true
-   and good.result.version == "15.6.1", json.encode(good))
+   and good.result.version == "15.7.0", json.encode(good))
 
 local batch_good = raw_call("batch", { _auth = "sekret-token", calls = {
   { method = "status", params = {} },

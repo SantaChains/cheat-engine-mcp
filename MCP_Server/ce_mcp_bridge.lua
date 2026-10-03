@@ -15,7 +15,7 @@
 -- CE_TRANSPORT=pipe option no longer has a counterpart here.
 -- ============================================================================
 
-local VERSION = "15.6.1"
+local VERSION = "15.7.0"
 
 local TCP_BASE_PORT = 17171
 -- Security default: loopback only. Remote debugging is opt-in via the
@@ -7698,6 +7698,162 @@ end
 cmd_dbvm_read_msr  = makeMsrRead("dbvm_readMSR")
 cmd_dbvm_write_msr = makeMsrWrite("dbvm_writeMSR")
 
+-- ---- UNIT-33 (v15.7.0): CT runtime memory / pointer health diagnostics -----
+
+-- One readability probe: returns true when at least one byte is readable.
+-- Kept trivial so the per-record/per-step cost stays one CE main-thread call.
+local function addrReadable(addr)
+    if not addr then return false end
+    local ok, b = pcall(readBytes, addr, 1, true)
+    return ok and b ~= nil
+end
+
+-- Validate a pointer chain step by step and report exactly where it breaks.
+-- Unlike read_pointer_chain (which answers "what is the final address"), this
+-- answers "is the chain alive, and if not, which hop died" — each step carries
+-- readability of the pointer source and of the dereferenced target.
+function cmd_validate_pointer_chain(params)
+    local base = params.base
+    if type(base) == "string" then base = getAddressSafe(base) end
+    if not base then
+        return { success = false, error = "Invalid base address", error_code = "INVALID_ADDRESS" }
+    end
+
+    local offsets = params.offsets or {}
+    if type(offsets) ~= "table" then
+        return { success = false, error = "offsets must be an array", error_code = "INVALID_PARAMS" }
+    end
+    -- One dereference + two readability probes per offset; unclamped = freeze.
+    if #offsets > 32 then
+        return { success = false, error = "too many offsets (" .. #offsets .. "), max 32",
+                 error_code = "INVALID_PARAMS" }
+    end
+
+    local steps = {}
+    local currentAddr = base
+    local baseReadable = addrReadable(currentAddr)
+    if not baseReadable then
+        return { success = true, valid = false, failed_step = 0,
+                 error = "base address is not readable",
+                 base = toHex(base), steps = steps }
+    end
+
+    for i, off in ipairs(offsets) do
+        local offN = tonumber(off)
+        if offN == nil then
+            return { success = false, error = "offset " .. i .. " is not a number",
+                     error_code = "INVALID_PARAMS" }
+        end
+        local okPtr, ptr = pcall(readPointer, currentAddr)
+        if not okPtr or not ptr then
+            return { success = true, valid = false, failed_step = i,
+                     error = "pointer read failed at step " .. i,
+                     base = toHex(base), steps = steps,
+                     failed_at_address = toHex(currentAddr) }
+        end
+        local nextAddr = ptr + offN
+        local nextReadable = addrReadable(nextAddr)
+        steps[#steps + 1] = {
+            step = i,
+            address = toHex(currentAddr),
+            offset = offN,
+            hex_offset = string.format("%+d", offN),
+            pointer_value = toHex(ptr),
+            next_address = toHex(nextAddr),
+            next_readable = nextReadable,
+        }
+        if not nextReadable then
+            return { success = true, valid = false, failed_step = i,
+                     error = "dereferenced address at step " .. i .. " is not readable",
+                     base = toHex(base), steps = steps,
+                     failed_at_address = toHex(nextAddr) }
+        end
+        currentAddr = nextAddr
+    end
+
+    return { success = true, valid = true, base = toHex(base),
+             final_address = toHex(currentAddr),
+             final_readable = addrReadable(currentAddr),
+             steps = steps }
+end
+
+-- Health check for every memory record in the loaded CT: is its address still
+-- resolvable, and is the target memory still readable? Answers "which entries
+-- of my cheat table died" without clicking through the GUI. Per-record status:
+--   ok          address resolved and target readable
+--   unresolved  address expression (symbol/pointer path) no longer evaluates
+--   unreadable  address resolved but target memory is not readable
+--   script      AA-script record, no address to check (has_script=true)
+--   group       group header, nothing to check
+function cmd_ct_memory_records_health(params)
+    local al, aerr = unit18_get_al()
+    if not al then return aerr end
+
+    local okC, total = pcall(function() return al.Count end)
+    if not okC or type(total) ~= "number" then total = 0 end
+
+    -- getAddressSafe + readBytes per record, both on the CE main thread.
+    local MAX_RECORDS = 5000
+    local budget = math.max(1, math.min(tonumber(params.limit) or 1000, MAX_RECORDS))
+    local records, truncated = {}, false
+    local counts = { ok = 0, unresolved = 0, unreadable = 0, script = 0, group = 0, skipped = 0 }
+
+    for i = 0, total - 1 do
+        if #records >= budget then truncated = true break end
+        local okR, rec = pcall(function() return al[i] end)
+        if okR and rec then
+            local prop = function(name)
+                local ok, v = pcall(function() return rec[name] end)
+                return ok and v or nil
+            end
+            local id = prop("ID")
+            local desc = prop("Description") or ""
+            local isGroup = prop("IsGroupHeader") == true
+            local hasScript = false
+            local script = prop("Script")
+            if type(script) == "string" and script ~= "" then hasScript = true end
+
+            local entry = { id = id, description = desc, address = prop("Address") or "" }
+            if isGroup then
+                counts.group = counts.group + 1
+                entry.status = "group"
+            elseif hasScript then
+                counts.script = counts.script + 1
+                entry.status = "script"
+                entry.has_script = true
+            else
+                local addr = getAddressSafe(entry.address)
+                if not addr then
+                    counts.unresolved = counts.unresolved + 1
+                    entry.status = "unresolved"
+                elseif not addrReadable(addr) then
+                    counts.unreadable = counts.unreadable + 1
+                    entry.status = "unreadable"
+                    entry.resolved_address = toHex(addr)
+                else
+                    counts.ok = counts.ok + 1
+                    entry.status = "ok"
+                    entry.resolved_address = toHex(addr)
+                end
+            end
+            records[#records + 1] = entry
+        else
+            counts.skipped = counts.skipped + 1
+        end
+    end
+
+    return {
+        success = true,
+        total = total,
+        checked = #records,
+        truncated = truncated,
+        summary = counts,
+        records = records,
+    }
+end
+
+-- ---- UNIT-33 end -----------------------------------------------------------
+
 function cmd_dbvm_cloak_activate(params)
     local phys = tonumber(params.physical_base)
     if not phys then return { success = false, error = "physical_base is required", error_code = "INVALID_PARAMS" } end
@@ -7777,6 +7933,8 @@ commandHandlers.table_file_create            = cmd_table_file_create
 commandHandlers.table_file_find              = cmd_table_file_find
 commandHandlers.table_file_export            = cmd_table_file_export
 commandHandlers.table_file_delete            = cmd_table_file_delete
+commandHandlers.validate_pointer_chain       = cmd_validate_pointer_chain
+commandHandlers.ct_memory_records_health     = cmd_ct_memory_records_health
 commandHandlers.register_aa_command          = cmd_register_aa_command
 commandHandlers.unregister_aa_command        = cmd_unregister_aa_command
 commandHandlers.http_get                     = cmd_http_get

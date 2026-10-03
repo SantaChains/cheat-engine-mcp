@@ -1,6 +1,6 @@
 # DEV_GUIDE — cheatengine-mcp-tcp-bridge 开发者指南
 
-> 面向维护者与二次开发者。版本基线：Lua bridge **v15.6.1** / Native DLL **v3.3.4**。
+> 面向维护者与二次开发者。版本基线：Lua bridge **v15.7.0** / Native DLL **v3.3.5**。
 > 所有数字（上限、端口、超时）均为代码中的真实常量，非建议值。
 
 ---
@@ -520,3 +520,69 @@ qword 负值合法性使 write_integer 校验的不对称成为设计；dbk_get_
 Lua 221 → **227**（+6：evaluate_lua 审计精确集、copy/compare/md5 钳位、越界文案、
 read_string 钳位路径）；Python 38 → **41**（+3：已送达不重试、未送达仍重试、socket
 deadline 超时关连接）；探针 4/0 不变。DLL 无变更（纯 Lua + Python + 测试 + 文档）。
+
+---
+
+## 16. 接口严查、DLL/C 更新、抗冲击与静态化（v15.7.0，UNIT-33）
+
+### 1. 跨层接口严查（含 DLL/C 审计）
+
+- **五全局契约**逐项核对：`mcp_tcp_start(port, bind)` / `poll` / `respond` / `stop` /
+  `status` 在 C 注册与 Lua 调用的名字、参数个数、返回字段全部一致；
+  `MAX_PORT_RANGE 10`（C）== `CE_PORT_SCAN_RANGE 10`（Python）== 文档。
+- **DLL 快路径**（dll_status / dll_enum_dialogs / dll_dismiss_dialog）的响应字段与
+  Python 工具 docstring 逐一吻合（error_code：INVALID_PARAMS / INVALID_TARGET /
+  NOT_FOUND / PROTECTED_WINDOW）。
+- **发现真实跨层安全缺口（C v3.3.5 修复）**：Lua 门禁在 `executeCommand`，而 dll_*
+  快路径在 C 服务器线程直接应答、**完全不经过 Lua**——设了 `CE_MCP_AUTH_TOKEN` 后
+  `dll_dismiss_dialog`（变更型：关窗口）仍可无令牌调用。v3.3.5 在
+  `handle_dll_fastpath` 增加同一契约的令牌门禁（luaopen 时经 `getenv` 捕获、
+  零填充 XOR 累加常量时间比较、AUTH_REQUIRED envelope 与 Lua 同构），
+  DLL_VERSION → 3.3.5，MSVC /MT 重建双架构并部署。
+- **连带发现并修复 Python 连接探测认证缺口**：`_is_ce_bridge` / `_diagnose_after_timeout`
+  的裸 ping 在令牌模式下会被 Lua 门禁拒绝 → `connect()` 永远失败。现探测 ping 在
+  `CE_AUTH_TOKEN` 存在时注入 `params._auth`。v15.6.0 的 Lua 测试未暴露此问题，
+  因为测试直接走 `MCP_Bridge.call`，没经过连接探测——接口严查的价值实证。
+
+### 2. CT 运行内存 / 指针健康检查（新工具，UNIT-33）
+
+- `validate_pointer_chain(base, offsets≤32)`：逐步验证指针链——每步报告指针值、
+  解引用目标、目标可读性；`valid=false` 时给出 `failed_step` 与失败地址。
+  与 `read_pointer_chain`（回答"终点是什么"）语义区分：本工具回答"链还活着吗、死在第几跳"。
+- `ct_memory_records_health(limit≤5000)`：遍历 CT 地址列表，逐条解析地址表达式并探测
+  可读性，分类 ok / unresolved（符号失效）/ unreadable（目标内存不可读）/ script / group，
+  汇总计数 + truncated 标记。用途：游戏更新后找出整张 CT 里失效的条目。
+- 两者均按本桥钳位哲学实现（每步 1-2 次主线程调用、预算上限、fail-fast INVALID_PARAMS）。
+
+### 3. 稳定性 / 抗冲击 / 大数据实验（离线全绿）
+
+- Lua：250 层嵌套请求确定性拒绝（codec 深度帽 200）不崩调度器；审计环形缓冲
+  220 次变更后恰为 200 条且保留最新；batch 64 全执行 / 65 前置拒绝；
+  512 KiB 字符串参数往返完好（实测 ≈86 ms，纯 Lua codec）；
+  batch 64 条 ≈11 ms（单往返 64 次调度）。
+- Python：垃圾响应体 → 结构化 INTERNAL_ERROR（不崩、不重试）；
+  `_decode_json_body` 对坏 JSON 抛 ConnectionError；1 MiB 载荷往返逐字节完好（<5 s）。
+
+### 4. Python 现代静态化（吸收 HPC/server 项目经验）
+
+- `from __future__ import annotations` + 全量注解：传输层 31 个函数签名、
+  客户端类属性（`sock: _socket.socket | None` 等）、`JsonDict` 别名、
+  稳定常量 `Final`（尺寸帽/主机/端口/令牌/扫描范围）；245 个工具全部 `-> str`。
+- 22 处隐式 Optional（`x: T = None`）全部改为 `T | None`——正是"依赖 bug 运行"的
+  典型温床（None 流入非空假设路径）。
+- mypy 检查标准固化在 `MCP_Server/mypy.ini`（check_untyped_defs +
+  no_implicit_optional + ignore_missing_imports）；结果 **0 errors**。
+  `type: ignore` 仅限六处刻意动态：SDK CRLF 补丁挂点 ×2、FastMCP/MCPServer 双版本
+  shim ×3、`mcp.tool` 记录器遮蔽 ×1——每处都有注释说明为什么是安全的。
+- 顺带修复 mypy 揪出的两个真实隐患：worker 线程 result box 的类型混装
+  （dict/Exception 同框）、`last_error` 循环内重注解。
+
+### 5. 测试与产物
+
+Lua **241/0**（+6：UNIT-33 成功链/断链/死跳/健康分类/预算截断/空表）、
+Python **45/0**（+4：垃圾响应结构化、解码层抛错、1 MiB 往返 ×2）、探针 4/0、
+mypy 0 errors、luac/py_compile OK。
+**DLL v3.3.5 双架构已重建部署**（MSVC /MT：x64 173,056 B md5 804813e3…、
+x86 145,920 B md5 f4ed7668…；vcvars 依赖 reg.exe 被沙箱拦截，改用手工
+INCLUDE/LIB 环境直接调 cl.exe，flags 与 build.bat 逐字一致）。
+**用户侧：需把新 DLL 复制到 CE plugins 并重载桥脚本。**
