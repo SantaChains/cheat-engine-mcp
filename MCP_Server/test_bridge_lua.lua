@@ -47,7 +47,7 @@ end
 
 -- ---------------------------------------------------------------- dispatcher
 print("== version / dispatcher ==")
-ok("version is 15.8.0", MCP_Bridge.version == "15.8.0", MCP_Bridge.version)
+ok("version is 15.8.1", MCP_Bridge.version == "15.8.1", MCP_Bridge.version)
 ok("batch / status / list_methods registered",
    MCP_Bridge.methods.batch and MCP_Bridge.methods.status and MCP_Bridge.methods.list_methods)
 local methodCount = 0
@@ -191,7 +191,7 @@ ok("string shorthand entry rejected as method-not-found",
 -- ------------------------------------------------------------- introspection
 print("== status / list_methods ==")
 local st = req("status")
-ok("status ok", st and st.result.success == true and st.result.version == "15.8.0")
+ok("status ok", st and st.result.success == true and st.result.version == "15.8.1")
 ok("method_count matches dispatcher", st and st.result.method_count == methodCount,
    st and st.result.method_count)
 ok("process_attached reflects CE state", st and st.result.process_attached == false)
@@ -207,7 +207,7 @@ ok("list_methods sorted", lm and lm.result.methods[1] <= lm.result.methods[2])
 local lmp = req("list_methods", { prefix = "dbk" })
 ok("prefix filter", lmp and lmp.result.total == 8 and lmp.result.methods[1] == "dbk_get_cr0",
    lmp and lmp.result.total)
-ok("status alias bridge_status", req("bridge_status").result.version == "15.8.0")
+ok("status alias bridge_status", req("bridge_status").result.version == "15.8.1")
 ok("list alias list_bridge_methods",
    req("list_bridge_methods", { limit = 1 }).result.total == methodCount)
 
@@ -965,7 +965,7 @@ readPointer, readBytes, getAddressList = _realReadPointer, _realReadBytes, _real
 end
 _test_unit33()
 
--- ---- UNIT-34 (v15.8.0): preflight + AOB health scan + inject preview --------
+-- ---- UNIT-34 (v15.8.1): preflight + AOB health scan + inject preview --------
 local function _test_unit34()
 print("== UNIT-34 session health ==")
 
@@ -1031,6 +1031,17 @@ do
      pf1 and #pf1.result.checks == 5 and pf1.result.checks[5].ok == false
      and pf1.result.symbols[1].resolved == true and pf1.result.symbols[1].address == "0x400000"
      and pf1.result.symbols[2].resolved == false, pf1 and json.encode(pf1.result))
+
+  -- v15.8.1 regression: getFileVersion returns TWO values; the version table
+  -- is the second one. The old two-value destructure always saw a non-table
+  -- and silently returned nil (token version matching degraded to "*"-only).
+  local _realGFV = getFileVersion
+  getFileVersion = function() return true, { major = 1, minor = 2, release = 3, build = 4 } end
+  local pf2 = req("preflight", {})
+  ok("preflight: game_version surfaces the getFileVersion table",
+     pf2 and pf2.result.game_version == "1.2.3.4" and pf2.result.checks[3].ok == true,
+     pf2 and json.encode(pf2.result))
+  getFileVersion = _realGFV
 
   -- aob_health_scan: memscan factory missing -> per-pattern error, honest report
   local ahErr = req("aob_health_scan", { patterns = { "48 89 5C" } })
@@ -1181,7 +1192,7 @@ ok("wrong token rejected AUTH_REQUIRED",
 
 local good = raw_call("status", { _auth = "sekret-token" })
 ok("correct token accepted", good.result and good.result.success == true
-   and good.result.version == "15.8.0", json.encode(good))
+   and good.result.version == "15.8.1", json.encode(good))
 
 local batch_good = raw_call("batch", { _auth = "sekret-token", calls = {
   { method = "status", params = {} },

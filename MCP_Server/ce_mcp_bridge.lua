@@ -15,7 +15,7 @@
 -- CE_TRANSPORT=pipe option no longer has a counterpart here.
 -- ============================================================================
 
-local VERSION = "15.8.0"
+local VERSION = "15.8.1"
 
 local TCP_BASE_PORT = 17171
 -- Security default: loopback only. Remote debugging is opt-in via the
@@ -511,7 +511,11 @@ end
 local function gameVersionString()
     local exePath = mainModuleExePath()
     if not exePath then return nil end
-    local ok, vt = pcall(function() return getFileVersion(exePath) end)
+    -- v15.8.1: getFileVersion returns TWO values; the closure propagates both,
+    -- so pcall yields (status, v1, v2) and the table is v2 -- the old two-value
+    -- destructure bound v1 (a non-table) and ALWAYS returned nil, silently
+    -- degrading signature-token version matching to wildcard-only.
+    local ok, _, vt = pcall(function() return getFileVersion(exePath) end)
     if not ok or type(vt) ~= "table" then return nil end
     return string.format("%d.%d.%d.%d", vt.major or 0, vt.minor or 0, vt.release or 0, vt.build or 0)
 end

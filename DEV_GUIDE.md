@@ -1,6 +1,6 @@
 # DEV_GUIDE — cheatengine-mcp-tcp-bridge 开发者指南
 
-> 面向维护者与二次开发者。版本基线：Lua bridge **v15.8.0** / Native DLL **v3.3.6**。
+> 面向维护者与二次开发者。版本基线：Lua bridge **v15.8.1** / Native DLL **v3.3.6**。
 > 所有数字（上限、端口、超时）均为代码中的真实常量，非建议值。
 
 ---
@@ -667,3 +667,24 @@ AOB 队列 mock hit+miss+ratio、模块解析失败/显式模块命中、inject 
 md5 13e938dd…；x86 145,920 B md5 0c5501b5…；PE 机器类型 0x8664/0x14c、
 版本串 3.3.6 ×3、无 3.3.5 残留）。真机连通性验证仍待用户侧复制 DLL +
 重载桥脚本后进行。
+
+### 4. 真机验证轮（v15.8.1，Baba Is You / Steam 版）
+
+用户启动 MCP 后真机实测（探针固化为 `MCP_Server/probe_live.py`，可复用）：
+
+- **真机通过**：桥 v15.8.0 加载（249/249 工具、调度 253）；live 套件 35/0；
+  `ct_preflight` ok=true（进程/主模块路径/大小/64 位全解析，带空格模块名
+  `Baba Is You.exe+0` 与引号形式均可解析）；`inject_preview` 三态全对
+  （MZ 头精确命中 match、变异期望 first_diff_offset=0、通配符拒绝）；
+  `aob_health_scan` 在 `-W` 下精确命中模块基址 MZ 头、垃圾模式诚实 miss
+  （PE 头页只读，`+X`/`+W` 扫不到属正确保护语义）；`validate_pointer_chain`
+  死链诚实上报 failed_step；`ct_memory_records_health` 真表分类正确。
+- **真机挖出并修复一个潜伏 bug（v15.8.1）**：`gameVersionString()` 对
+  `getFileVersion` 双返回值解构错误——pcall 闭包传播两个返回值时表是第二个，
+  旧代码两值解构把第一个非 table 绑给 vt，**永远返回 nil**，签名令牌的按
+  版本匹配静默退化成仅 `*` 通配。真机证据：exe 有版本资源（1.0.0.0）但
+  game_version=None。修复为三值解构；离线回归 +1（Lua **266/0**）。
+- **待用户动作**：① 复制 DLL v3.3.6 到 CE plugins（当前还是 35,840B 旧
+  MinGW 版，`dll_ping`/`dll_status`/`dll_enum_dialogs` 快路径全缺失）并重启
+  CE；② File → Execute Script 重载 v15.8.1 桥脚本。两者完成后 fastpath、
+  game_version 两项探针才会转绿。
