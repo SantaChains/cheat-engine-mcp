@@ -15,7 +15,13 @@
 -- CE_TRANSPORT=pipe option no longer has a counterpart here.
 -- ============================================================================
 
-local VERSION = "15.8.1"
+local VERSION = "15.8.2"
+
+-- v15.8.2: valid-name catalogs for scan parameters (used by fail-fast
+-- INVALID_PARAMS messages; must live above cmd_scan_all which is defined
+-- before the resolver functions).
+local VAR_TYPE_NAMES  = "byte, word, dword, qword, float, double, string"
+local SCAN_OPTION_NAMES = "exact, unknown, between, bigger, smaller, increased, decreased, changed, unchanged"
 
 local TCP_BASE_PORT = 17171
 -- Security default: loopback only. Remote debugging is opt-in via the
@@ -1364,18 +1370,31 @@ end
 
 function cmd_scan_all(params)
     local value = params.value
-    local vtype = params.type or "dword"
-    
-    local ms = createMemScan()
-    local scanOpt = soExactValue
-    local varType = vtDword
-    
-    if vtype == "byte" then varType = vtByte
-    elseif vtype == "word" then varType = vtWord
-    elseif vtype == "qword" then varType = vtQword
-    elseif vtype == "float" then varType = vtSingle
+    -- v15.8.2: 'type' is the VALUE type here (byte/word/dword/qword/float/
+    -- double/string) even though the Python docstring historically called it
+    -- the scan type ("exact"). Accept the legacy names explicitly, reject
+    -- everything else, and resolve BEFORE createMemScan so typos fail fast.
+    local vtype = (params.var_type or params.type or "dword"):lower()
+    if vtype == "exact" or vtype == "array" then vtype = "dword" end
+
+    -- Strict value-type mapping inline (this handler sits above the shared
+    -- resolveVarType local, which is not yet in scope here).
+    local varType
+    if     vtype == "byte"   then varType = vtByte
+    elseif vtype == "word"   then varType = vtWord
+    elseif vtype == "dword"  then varType = vtDword
+    elseif vtype == "qword"  then varType = vtQword
+    elseif vtype == "float"  then varType = vtSingle
     elseif vtype == "double" then varType = vtDouble
     elseif vtype == "string" then varType = vtString end
+    if not varType then
+        return { success = false, error_code = "INVALID_PARAMS",
+                 error = "unknown value type '" .. tostring(params.type) .. "' (valid: " .. VAR_TYPE_NAMES
+                         .. "; legacy aliases: exact, array -> dword)" }
+    end
+
+    local ms = createMemScan()
+    local scanOpt = soExactValue
     
     -- Use specific protection flags if provided (defaults to +W-C from Python)
     -- CRITICAL: Limit scan to User Mode space (0x7FFFFFFFFFFFFFFF) to prevent BSODs in Kernel/Guard regions
@@ -4416,6 +4435,8 @@ serverState.persistent_scans = serverState.persistent_scans or {}
 -- Helper: map human-readable var-type string to CE constant
 local function resolveVarType(vtype)
     local t = (vtype or "dword"):lower()
+    -- v15.8.2: unknown names return nil (callers fail fast with
+    -- INVALID_PARAMS) instead of silently scanning as dword.
     if t == "byte"   then return vtByte
     elseif t == "word"   then return vtWord
     elseif t == "dword"  then return vtDword
@@ -4423,23 +4444,28 @@ local function resolveVarType(vtype)
     elseif t == "float"  then return vtSingle
     elseif t == "double" then return vtDouble
     elseif t == "string" then return vtString
-    else return vtDword
+    else return nil
     end
 end
 
 -- Helper: map human-readable scan_option to CE constant
 local function resolveScanOption(opt)
     local o = (opt or "exact"):lower()
+    -- v15.8.2: unknown names return nil so callers fail fast with
+    -- INVALID_PARAMS. The old silent fallback to soExactValue made e.g.
+    -- scan_option "value_between" (wrong name; the real one is "between",
+    -- now accepted as an alias) run an exact scan for a literal "0;10000"
+    -- string and silently corrupt the scan session.
     if o == "exact"          then return soExactValue
     elseif o == "unknown"    then return soUnknownValue
-    elseif o == "between"    then return soValueBetween
+    elseif o == "between" or o == "value_between" then return soValueBetween
     elseif o == "bigger"     then return soBiggerThan
     elseif o == "smaller"    then return soSmallerThan
     elseif o == "increased"  then return soIncreasedValue
     elseif o == "decreased"  then return soDecreasedValue
     elseif o == "changed"    then return soChanged
     elseif o == "unchanged"  then return soUnchanged
-    else return soExactValue
+    else return nil
     end
 end
 
@@ -4627,9 +4653,6 @@ function cmd_create_persistent_scan(params)
 end
 
 function cmd_persistent_scan_first_scan(params)
-    local ok, err = requireProcess()
-    if not ok then return err end
-
     local name        = params.name
     local value       = params.value
     local vtype       = params.type or "dword"
@@ -4638,14 +4661,35 @@ function cmd_persistent_scan_first_scan(params)
     if not name  then return { success = false, error = "No name provided",  error_code = "INVALID_PARAMS" } end
     if not value then return { success = false, error = "No value provided", error_code = "INVALID_PARAMS" } end
 
+    -- v15.8.2: strict name validation BEFORE the process guard so callers
+    -- learn about typos immediately instead of silently scanning as
+    -- dword/exact and corrupting the session.
+    local varType = resolveVarType(vtype)
+    if not varType then
+        return { success = false, error_code = "INVALID_PARAMS",
+                 error = "unknown value type '" .. tostring(vtype) .. "' (valid: " .. VAR_TYPE_NAMES .. ")" }
+    end
+    local scanOpt = resolveScanOption(scan_option)
+    if not scanOpt then
+        return { success = false, error_code = "INVALID_PARAMS",
+                 error = "unknown scan_option '" .. tostring(scan_option) .. "' (valid: " .. SCAN_OPTION_NAMES .. ")" }
+    end
+
+    local ok, err = requireProcess()
+    if not ok then return err end
+
     local entry = serverState.persistent_scans[name]
     if not entry then
         return { success = false, error = "Scan '" .. name .. "' not found. Call create_persistent_scan first.", error_code = "INVALID_PARAMS" }
     end
 
-    local ms        = entry.ms
-    local varType   = resolveVarType(vtype)
-    local scanOpt   = resolveScanOption(scan_option)
+    local ms = entry.ms
+
+    -- v15.8.2: same between-form guard as the next-scan path.
+    if scanOpt == soValueBetween and (type(value) ~= "string" or not value:find(";", 1, true)) then
+        return { success = false, error_code = "INVALID_PARAMS",
+                 error = "scan_option 'between' requires value in 'v1;v2' form" }
+    end
 
     local fsOk, fsMsg = pcall(function()
         if scanOpt == soValueBetween and value and string.find(value, ";") then
@@ -4681,14 +4725,22 @@ function cmd_persistent_scan_first_scan(params)
 end
 
 function cmd_persistent_scan_next_scan(params)
-    local ok, err = requireProcess()
-    if not ok then return err end
-
     local name        = params.name
     local value       = params.value
     local scan_option = params.scan_option or "exact"
 
     if not name then return { success = false, error = "No name provided", error_code = "INVALID_PARAMS" } end
+
+    -- v15.8.2: strict option validation BEFORE the process guard (fail fast
+    -- on typos instead of silently running an exact scan).
+    local scanOpt = resolveScanOption(scan_option)
+    if not scanOpt then
+        return { success = false, error_code = "INVALID_PARAMS",
+                 error = "unknown scan_option '" .. tostring(scan_option) .. "' (valid: " .. SCAN_OPTION_NAMES .. ")" }
+    end
+
+    local ok, err = requireProcess()
+    if not ok then return err end
 
     local entry = serverState.persistent_scans[name]
     if not entry then
@@ -4698,8 +4750,14 @@ function cmd_persistent_scan_next_scan(params)
         return { success = false, error = "No first scan done for '" .. name .. "'. Call persistent_scan_first_scan first.", error_code = "INVALID_PARAMS" }
     end
 
-    local ms      = entry.ms
-    local scanOpt = resolveScanOption(scan_option)
+    local ms = entry.ms
+
+    -- v15.8.2: a between filter without the "v1;v2" separator would hand a
+    -- bare value to CE's between scan; reject it up front.
+    if scanOpt == soValueBetween and (type(value) ~= "string" or not value:find(";", 1, true)) then
+        return { success = false, error_code = "INVALID_PARAMS",
+                 error = "scan_option 'between' requires value in 'v1;v2' form" }
+    end
 
     local nsOk, nsMsg = pcall(function()
         if scanOpt == soValueBetween and value and string.find(value, ";") then

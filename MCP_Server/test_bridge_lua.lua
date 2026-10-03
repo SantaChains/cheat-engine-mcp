@@ -47,7 +47,7 @@ end
 
 -- ---------------------------------------------------------------- dispatcher
 print("== version / dispatcher ==")
-ok("version is 15.8.1", MCP_Bridge.version == "15.8.1", MCP_Bridge.version)
+ok("version is 15.8.2", MCP_Bridge.version == "15.8.2", MCP_Bridge.version)
 ok("batch / status / list_methods registered",
    MCP_Bridge.methods.batch and MCP_Bridge.methods.status and MCP_Bridge.methods.list_methods)
 local methodCount = 0
@@ -191,7 +191,7 @@ ok("string shorthand entry rejected as method-not-found",
 -- ------------------------------------------------------------- introspection
 print("== status / list_methods ==")
 local st = req("status")
-ok("status ok", st and st.result.success == true and st.result.version == "15.8.1")
+ok("status ok", st and st.result.success == true and st.result.version == "15.8.2")
 ok("method_count matches dispatcher", st and st.result.method_count == methodCount,
    st and st.result.method_count)
 ok("process_attached reflects CE state", st and st.result.process_attached == false)
@@ -207,7 +207,7 @@ ok("list_methods sorted", lm and lm.result.methods[1] <= lm.result.methods[2])
 local lmp = req("list_methods", { prefix = "dbk" })
 ok("prefix filter", lmp and lmp.result.total == 8 and lmp.result.methods[1] == "dbk_get_cr0",
    lmp and lmp.result.total)
-ok("status alias bridge_status", req("bridge_status").result.version == "15.8.1")
+ok("status alias bridge_status", req("bridge_status").result.version == "15.8.2")
 ok("list alias list_bridge_methods",
    req("list_bridge_methods", { limit = 1 }).result.total == methodCount)
 
@@ -965,7 +965,7 @@ readPointer, readBytes, getAddressList = _realReadPointer, _realReadBytes, _real
 end
 _test_unit33()
 
--- ---- UNIT-34 (v15.8.1): preflight + AOB health scan + inject preview --------
+-- ---- UNIT-34 (v15.8.2): preflight + AOB health scan + inject preview --------
 local function _test_unit34()
 print("== UNIT-34 session health ==")
 
@@ -1032,7 +1032,7 @@ do
      and pf1.result.symbols[1].resolved == true and pf1.result.symbols[1].address == "0x400000"
      and pf1.result.symbols[2].resolved == false, pf1 and json.encode(pf1.result))
 
-  -- v15.8.1 regression: getFileVersion returns TWO values; the version table
+  -- v15.8.2 regression: getFileVersion returns TWO values; the version table
   -- is the second one. The old two-value destructure always saw a non-table
   -- and silently returned nil (token version matching degraded to "*"-only).
   local _realGFV = getFileVersion
@@ -1109,6 +1109,23 @@ end
 getOpenedProcessID, enumModules, createMemScan, getModuleSize = _realPid, _realEnum, _realMS, _realGMS
 end
 _test_unit34()
+
+-- ---- v15.8.2: strict scan option / var type names ---------------------------
+print("== v15.8.2 strict scan names ==")
+ok("scan_all: unknown value type -> INVALID_PARAMS (fail fast)",
+   req("scan_all", { value = "1", type = "value_between" }).result.error_code == "INVALID_PARAMS")
+ok("scan_all: legacy 'exact' passes strict validation (offline reaches memscan stage, not INVALID_PARAMS)",
+   req("scan_all", { value = "1", type = "exact" }).result.error_code ~= "INVALID_PARAMS")
+ok("ps next: unknown option -> INVALID_PARAMS before process guard",
+   req("persistent_scan_next_scan", { name = "s", scan_option = "value_typo" }).result.error_code == "INVALID_PARAMS")
+ok("ps next: value_between alias accepted -> NO_PROCESS (past validation)",
+   req("persistent_scan_next_scan", { name = "s", scan_option = "value_between" }).result.error_code == "NO_PROCESS")
+ok("ps next: 'between' accepted -> NO_PROCESS",
+   req("persistent_scan_next_scan", { name = "s", scan_option = "between" }).result.error_code == "NO_PROCESS")
+ok("ps first: unknown var type -> INVALID_PARAMS before process guard",
+   req("persistent_scan_first_scan", { name = "s", value = "1", type = "int64" }).result.error_code == "INVALID_PARAMS")
+ok("ps first: bad option -> INVALID_PARAMS before process guard",
+   req("persistent_scan_first_scan", { name = "s", value = "1", scan_option = "typo" }).result.error_code == "INVALID_PARAMS")
 
 -- ---- stability / shock + large-data experiments (v15.7.0) -------------------
 local function _test_stability()
@@ -1192,7 +1209,7 @@ ok("wrong token rejected AUTH_REQUIRED",
 
 local good = raw_call("status", { _auth = "sekret-token" })
 ok("correct token accepted", good.result and good.result.success == true
-   and good.result.version == "15.8.1", json.encode(good))
+   and good.result.version == "15.8.2", json.encode(good))
 
 local batch_good = raw_call("batch", { _auth = "sekret-token", calls = {
   { method = "status", params = {} },

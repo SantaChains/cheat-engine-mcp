@@ -2,7 +2,7 @@
 
 # Cheat Engine MCP Bridge — 原生 TCP 版
 
-[![Version](https://img.shields.io/badge/version-15.8.1-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-原生%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/工具-249-brightgreen.svg)](#可用工具)
+[![Version](https://img.shields.io/badge/version-15.8.2-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-原生%20TCP%20DLL-orange.svg)](#) [![Tools](https://img.shields.io/badge/工具-249-brightgreen.svg)](#可用工具)
 
 让你的 AI 助手（Claude、Cursor、Codex、任何 MCP 客户端）直接驱动 **Cheat Engine**：
 读写进程内存、扫描数值、反汇编函数、下断点、注入代码、操作 CT 表——**198 个 MCP 工具**，
@@ -99,7 +99,7 @@ dofile([[C:\path\to\MCP_Server\ce_mcp_bridge.lua]])
 ```
 [MCP] CE x64 - loading ce_mcp_tcp_x64.dll
 [MCP] DLL loaded OK from: C:\Program Files\Cheat Engine\plugins\ce_mcp_tcp_x64.dll
-[MCP] Bridge v15.8.1 started on 127.0.0.1:17171 (native TCP, 1ms poll)
+[MCP] Bridge v15.8.2 started on 127.0.0.1:17171 (native TCP, 1ms poll)
 ```
 
 不会弹出任何窗口——DLL 调试控制台默认隐藏（`CE_MCP_DEBUG_CONSOLE=1` 可显示，且不抢焦点）。
@@ -217,7 +217,7 @@ DLL 默认只绑定 `127.0.0.1`。远程访问需在 CE 机器启动前设置环
 问 AI：*"Ping 一下 Cheat Engine"*
 
 ```json
-{"success": true, "version": "15.8.1", "message": "CE MCP Bridge v15.8.0 alive"}
+{"success": true, "version": "15.8.2", "message": "CE MCP Bridge v15.8.0 alive"}
 ```
 
 ---

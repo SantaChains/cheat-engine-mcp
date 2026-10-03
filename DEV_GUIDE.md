@@ -1,6 +1,6 @@
 # DEV_GUIDE — cheatengine-mcp-tcp-bridge 开发者指南
 
-> 面向维护者与二次开发者。版本基线：Lua bridge **v15.8.1** / Native DLL **v3.3.6**。
+> 面向维护者与二次开发者。版本基线：Lua bridge **v15.8.2** / Native DLL **v3.3.6**。
 > 所有数字（上限、端口、超时）均为代码中的真实常量，非建议值。
 
 ---
@@ -688,3 +688,34 @@ md5 13e938dd…；x86 145,920 B md5 0c5501b5…；PE 机器类型 0x8664/0x14c�
   MinGW 版，`dll_ping`/`dll_status`/`dll_enum_dialogs` 快路径全缺失）并重启
   CE；② File → Execute Script 重载 v15.8.1 桥脚本。两者完成后 fastpath、
   game_version 两项探针才会转绿。
+
+## 19. 交互链受控审计轮（v15.8.2）
+
+游戏坐标实测受挫后，按用户要求对 CE↔MCP 交互链做受控实验审计（在 CE 分配的
+scratch 内存写入已知值，逐环验证），结论：
+
+**链路主体正确（受控实验全过）**：allocate → write_integer → scan_all exact →
+get_scan_results → next_scan exact；persistent exact first → between（范围内
+保留/范围外剔除）→ unknown first → changed → exact 收敛。注意
+`persistent_scan_get_results` 是分页的——判定「某地址不在结果里」必须拉全
+分页（本轮一次误判就是只看了前 10 万条）。
+
+**真实缺陷（已修复）**：
+1. **无效参数名静默降级**：`resolveScanOption("value_between")`（错名，正名
+   是 `between`）落到 else 变成 soExactValue，把字面量 "0;10000" 当精确值
+   扫描且不报错——会话状态被静默污染。`resolveVarType` 同病（未知类型静默
+   按 dword 扫）。修复：两 resolver 未知名字返回 nil，调用点校验前置于进程
+   守卫，fail-fast INVALID_PARAMS 并列出合法名字；`value_between` 收编为
+   `between` 的合法别名。
+2. **between 缺分号**：`between` 过滤传入不带 `v1;v2` 的裸值会直接交给 CE，
+   上移前置校验拒绝。
+3. **跨层接口语义不一致**：Python `scan_all` docstring 称 type 是扫描类型
+   （"exact, string, array"），Lua 却按值类型解析（默认 dword）——传
+   "array" 会静默按 dword 扫。修复：docstring 对齐为「值类型」，新增
+   `var_type` 显式参数，legacy `exact`/`array` 显式映射 dword，未知名字
+   INVALID_PARAMS。
+
+**教训**：调试会话里自己传错参数名（value_between）与桥的静默降级叠加，
+把「区间过滤无效」误判成 CE 语义问题——受控实验（已知值写入已知地址）
+是唯一能把「工具错了」和「我用错了」分开的手段。已加入回归
+（Lua **273/0**；Python 45/0、mypy 0 未变）。

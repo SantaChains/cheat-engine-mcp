@@ -1144,9 +1144,25 @@ def checksum_memory(address: str, size: int) -> str:
 # --- SCANNING ---
 
 @mcp.tool()
-def scan_all(value: str, type: str = "exact", protection: str = "+W-C") -> str:
-    """Unified Memory Scanner. Types: exact, string, array. Protection: +W-C (Writable, Not Copy-on-Write)."""
-    return format_result(call("scan_all", {"value": value, "type": type, "protection": protection}))
+def scan_all(value: str, type: str = "exact", protection: str = "+W-C", var_type: str | None = None) -> str:
+    """Exact-value scan over all writable (non-CoW) memory.
+
+    Args:
+        value: The value to find, as text (e.g. "100", "3.14", "hello").
+        type: VALUE type, not the scan kind (the scan is always exact):
+            dword (default), byte, word, qword, float, double, string.
+            Legacy aliases "exact"/"array" map to dword. Unknown names are
+            rejected with INVALID_PARAMS (since bridge 15.8.2).
+        var_type: Optional explicit value type; overrides `type` when given.
+        protection: Memory protection filter, default "+W-C".
+
+    Returns JSON with success and count; then use get_scan_results /
+    next_scan to page or narrow. For pattern searches use aob_scan instead.
+    """
+    params: dict[str, Any] = {"value": value, "type": type, "protection": protection}
+    if var_type is not None:
+        params["var_type"] = var_type
+    return format_result(call("scan_all", params))
 
 @mcp.tool()
 def get_scan_results(offset: int = 0, limit: int = 100, max: int | None = None) -> str:
@@ -2403,7 +2419,9 @@ def create_persistent_scan(name: str) -> str:
 def persistent_scan_first_scan(name: str, value: str, type: str = "dword", scan_option: str = "exact") -> str:
     """Run the first scan on a named persistent scan session.
     Types: byte, word, dword, qword, float, double, string.
-    Scan options: exact, unknown, between, bigger, smaller.
+    Scan options: exact, unknown, between, bigger, smaller (alias:
+    value_between). "between" requires value in "v1;v2" form. Unknown names
+    are rejected with INVALID_PARAMS (since bridge 15.8.2).
     Returns {success, scan_name, count}."""
     return format_result(call("persistent_scan_first_scan", {
         "name": name,
@@ -2415,7 +2433,10 @@ def persistent_scan_first_scan(name: str, value: str, type: str = "dword", scan_
 @mcp.tool()
 def persistent_scan_next_scan(name: str, value: str | None = None, scan_option: str = "exact") -> str:
     """Narrow down results with a next scan on a named persistent scan session.
-    Scan options: exact, increased, decreased, changed, unchanged, bigger, smaller.
+    Scan options: exact, between, bigger, smaller, increased, decreased,
+    changed, unchanged (alias: value_between). "between" requires value in
+    "v1;v2" form. Unknown names are rejected with INVALID_PARAMS (since
+    bridge 15.8.2).
     Returns {success, scan_name, count}."""
     params = {"name": name, "scan_option": scan_option}
     if value is not None:
