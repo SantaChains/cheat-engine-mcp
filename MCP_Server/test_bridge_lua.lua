@@ -1114,6 +1114,8 @@ _test_unit34()
 print("== v15.8.2 strict scan names ==")
 ok("scan_all: unknown value type -> INVALID_PARAMS (fail fast)",
    req("scan_all", { value = "1", type = "value_between" }).result.error_code == "INVALID_PARAMS")
+ok("scan_all: missing value -> INVALID_PARAMS",
+   req("scan_all", { type = "dword" }).result.error_code == "INVALID_PARAMS")
 ok("scan_all: legacy 'exact' passes strict validation (offline reaches memscan stage, not INVALID_PARAMS)",
    req("scan_all", { value = "1", type = "exact" }).result.error_code ~= "INVALID_PARAMS")
 ok("ps next: unknown option -> INVALID_PARAMS before process guard",

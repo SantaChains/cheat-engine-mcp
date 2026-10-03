@@ -1370,6 +1370,9 @@ end
 
 function cmd_scan_all(params)
     local value = params.value
+    if value == nil or value == "" then
+        return { success = false, error = "No value provided", error_code = "INVALID_PARAMS" }
+    end
     -- v15.8.2: 'type' is the VALUE type here (byte/word/dword/qword/float/
     -- double/string) even though the Python docstring historically called it
     -- the scan type ("exact"). Accept the legacy names explicitly, reject
